@@ -1,6 +1,6 @@
 {
   "name": "leaflet-routing-machine",
-  "version": "3.2.12",
+  "version": "3.2.14",
   "description": "Routing for Leaflet",
   "directories": {
     "example": "examples",
@@ -34,15 +34,15 @@
   },
   "main": "./dist/leaflet-routing-machine.js",
   "devDependencies": {
-    "browserify": "^14.1.0",
-    "browserify-derequire": "^0.9.4",
-    "browserify-shim": "^3.8.13",
-    "derequire": "^2.0.6",
-    "uglify-js": "^2.8.2"
+    "browserify": "^17.0.0",
+    "browserify-derequire": "^1.1.1",
+    "browserify-shim": "^3.8.16",
+    "derequire": "^2.1.1",
+    "uglify-js": "^3.17.4"
   },
   "dependencies": {
     "@mapbox/corslite": "0.0.7",
-    "@mapbox/polyline": "^0.2.0",
-    "osrm-text-instructions": "^0.13.2"
+    "@mapbox/polyline": "^1.2.1",
+    "osrm-text-instructions": "0.14.1-beta.3"
   }
 }
