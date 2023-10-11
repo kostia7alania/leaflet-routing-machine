@@ -99,9 +99,13 @@
 					pl.on('mousedown', this._onLineTouched, this);
 				}
 
-				pl.on('mouseover', function (arg) {
-					return this._onLineMouseOver(arg, pl)
-				}, this);
+				const events = ['mouseover', 'mouseout', 'mouseenter','mouseleave']
+				
+				events.forEach(eventName => {
+					pl.on(eventName, function (arg) {
+						return this._onLineMouse(arg, pl, 'line-' + eventName)
+					}, this);
+				})
 			}
 		},
 
@@ -124,14 +128,14 @@
 			L.DomEvent.stop(e);
 		},
 
-		_onLineMouseOver: function (e, pl) {
-			console.log('--- [line.js] --- run _onLineMouseOver', e)
+		_onLineMouse: function (e, pl, eventName) {
+			console.log('--- [line.js] [_onLineMouse] --- run _onLineMouse', e, { eventName })
 
 			var afterIndex = this._findNearestWpBefore(this._findClosestRoutePoint(e.latlng));
 
-			console.log('[_onLineMouseOver] + trying to SEX fire "linemouseovered"', afterIndex)
+			console.log('--- [line.js] [_onLineMouse] --- trying to dispatch event', { eventName, afterIndex })
 
-			var event = new CustomEvent("linemouseovered", {
+			var event = new CustomEvent(eventName, {
 				detail: {
 					afterIndex: afterIndex,
 					latlng: e.latlng,
