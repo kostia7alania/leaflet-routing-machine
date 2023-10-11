@@ -109,23 +109,22 @@ var polyline = {};
 
 function py2_round(value) {
     // Google's polyline algorithm uses the same rounding strategy as Python 2, which is different from JS for negative values
-    return Math.floor(Math.abs(value) + 0.5) * Math.sign(value);
+    return Math.floor(Math.abs(value) + 0.5) * (value >= 0 ? 1 : -1);
 }
 
 function encode(current, previous, factor) {
     current = py2_round(current * factor);
     previous = py2_round(previous * factor);
-    var coordinate = current - previous;
-    coordinate <<= 1;
-    if (current - previous < 0) {
-        coordinate = ~coordinate;
+    var coordinate = (current - previous) * 2;
+    if (coordinate < 0) {
+        coordinate = -coordinate - 1
     }
     var output = '';
     while (coordinate >= 0x20) {
         output += String.fromCharCode((0x20 | (coordinate & 0x1f)) + 63);
-        coordinate >>= 5;
+        coordinate /= 32;
     }
-    output += String.fromCharCode(coordinate + 63);
+    output += String.fromCharCode((coordinate | 0) + 63);
     return output;
 }
 
@@ -150,7 +149,7 @@ polyline.decode = function(str, precision) {
         byte = null,
         latitude_change,
         longitude_change,
-        factor = Math.pow(10, precision || 5);
+        factor = Math.pow(10, Number.isInteger(precision) ? precision : 5);
 
     // Coordinates have variable length when encoded, so just keep
     // track of whether we've hit the end of the string. In each
@@ -159,26 +158,27 @@ polyline.decode = function(str, precision) {
 
         // Reset shift, result, and byte
         byte = null;
-        shift = 0;
+        shift = 1;
         result = 0;
 
         do {
             byte = str.charCodeAt(index++) - 63;
-            result |= (byte & 0x1f) << shift;
-            shift += 5;
+            result += (byte & 0x1f) * shift;
+            shift *= 32;
         } while (byte >= 0x20);
 
-        latitude_change = ((result & 1) ? ~(result >> 1) : (result >> 1));
+        latitude_change = (result & 1) ? ((-result - 1) / 2) : (result / 2);
 
-        shift = result = 0;
+        shift = 1;
+        result = 0;
 
         do {
             byte = str.charCodeAt(index++) - 63;
-            result |= (byte & 0x1f) << shift;
-            shift += 5;
+            result += (byte & 0x1f) * shift;
+            shift *= 32;
         } while (byte >= 0x20);
 
-        longitude_change = ((result & 1) ? ~(result >> 1) : (result >> 1));
+        longitude_change = (result & 1) ? ((-result - 1) / 2) : (result / 2);
 
         lat += latitude_change;
         lng += longitude_change;
@@ -199,7 +199,7 @@ polyline.decode = function(str, precision) {
 polyline.encode = function(coordinates, precision) {
     if (!coordinates.length) { return ''; }
 
-    var factor = Math.pow(10, precision || 5),
+    var factor = Math.pow(10, Number.isInteger(precision) ? precision : 5),
         output = encode(coordinates[0][0], 0, factor) + encode(coordinates[0][1], 0, factor);
 
     for (var i = 1; i < coordinates.length; i++) {
@@ -214,7 +214,8 @@ polyline.encode = function(coordinates, precision) {
 function flipped(coords) {
     var flipped = [];
     for (var i = 0; i < coords.length; i++) {
-        flipped.push(coords[i].slice().reverse());
+        var coord = coords[i].slice();
+        flipped.push([coord[1], coord[0]]);
     }
     return flipped;
 }
@@ -448,7 +449,14 @@ module.exports = function(version) {
             var wayName = this.getWayName(language, step, options);
 
             // Decide which instruction string to use
-            // Destination takes precedence over name
+            // In order of precedence:
+            //   - exit + destination signage
+            //   - destination signage
+            //   - exit signage
+            //   - junction name
+            //   - road name
+            //   - waypoint name (for arrive maneuver)
+            //   - default
             var instruction;
             if (step.destinations && step.exits && instructionObject.exit_destination) {
                 instruction = instructionObject.exit_destination;
@@ -456,6 +464,8 @@ module.exports = function(version) {
                 instruction = instructionObject.destination;
             } else if (step.exits && instructionObject.exit) {
                 instruction = instructionObject.exit;
+            } else if (step.junction_name && instructionObject.junction_name) {
+                instruction = instructionObject.junction_name;
             } else if (wayName && instructionObject.name) {
                 instruction = instructionObject.name;
             } else if (options.waypointName && instructionObject.named) {
@@ -488,7 +498,8 @@ module.exports = function(version) {
                 'modifier': instructions[language][version].constants.modifier[modifier],
                 'direction': this.directionFromDegree(language, step.maneuver.bearing_after),
                 'nth': nthWaypoint,
-                'waypoint_name': options.waypointName
+                'waypoint_name': options.waypointName,
+                'junction_name': (step.junction_name || '').split(';')[0]
             };
 
             return this.tokenize(language, instruction, replaceTokens, options);
@@ -596,7 +607,7 @@ var grammarRu = _dereq_('./languages/grammar/ru.json');
 var abbreviationsBg = _dereq_('./languages/abbreviations/bg.json');
 var abbreviationsCa = _dereq_('./languages/abbreviations/ca.json');
 var abbreviationsDa = _dereq_('./languages/abbreviations/da.json');
-var ebbreviationsDe = _dereq_('./languages/abbreviations/de.json');
+var abbreviationsDe = _dereq_('./languages/abbreviations/de.json');
 var abbreviationsEn = _dereq_('./languages/abbreviations/en.json');
 var abbreviationsEs = _dereq_('./languages/abbreviations/es.json');
 var abbreviationsFr = _dereq_('./languages/abbreviations/fr.json');
@@ -657,7 +668,7 @@ var abbreviations = {
     'bg': abbreviationsBg,
     'ca': abbreviationsCa,
     'da': abbreviationsDa,
-    'de': ebbreviationsDe,
+    'de': abbreviationsDe,
     'en': abbreviationsEn,
     'es': abbreviationsEs,
     'fr': abbreviationsFr,
@@ -3454,28 +3465,33 @@ module.exports={
             },
             "sharp left": {
                 "default": "انعطف يساراً حاداً",
-                "name": "انعطف يساراً حاداً لتبقى على  {way_name}",
-                "destination": "انعطف يساراً حاداً نحو {destination}"
+                "name": "انعطف يساراً حاداً لتبقى على {way_name}",
+                "destination": "انعطف يساراً حاداً نحو {destination}",
+                "junction_name": "انعطف يساراً حاداً لتبقى على {junction_name}"
             },
             "sharp right": {
                 "default": "انعطف يمينا حاداً ",
                 "name": "انعطف يميناً حاداً لتبقى على {way_name}",
-                "destination": "انعطف يميناً حاداً نحو {destination}"
+                "destination": "انعطف يميناً حاداً نحو {destination}",
+                "junction_name": "انعطف يميناً حاداً لتبقى على {junction_name}"
             },
             "slight left": {
                 "default": "انعطف يساراً قليلاً",
-                "name": " انعطف يساراً قليلاً لتبقى على  {way_name} ",
-                "destination": "انعطف يساراً قليلاً نحو {destination}"
+                "name": "انعطف يساراً قليلاً لتبقى على {way_name}",
+                "destination": "انعطف يساراً قليلاً نحو {destination}",
+                "junction_name": "انعطف يساراً قليلاً لتبقى على {junction_name}"
             },
             "slight right": {
                 "default": "انعطف يميناً قليلاً",
                 "name": "انعطف يميناً قليلاً لتبقى على {way_name}",
-                "destination": "انعطف يميناً قليلاً نحو {destination} "
+                "destination": "انعطف يميناً قليلاً نحو {destination}",
+                "junction_name": "انعطف يميناً قليلاً نحو {junction_name}"
             },
             "uturn": {
                 "default": "انعطف دوراناً عكسياً",
                 "name": "انعطف دوراناً عكسياً  وتابع نحو {way_name}",
-                "destination": "انعطف دوراناً عكسياً نحو {destination}"
+                "destination": "انعطف دوراناً عكسياً نحو {destination}",
+                "junction_name": "انعطف دوراناً عكسياً  وتابع نحو {junction_name}"
             }
         },
         "depart": {
@@ -3489,17 +3505,20 @@ module.exports={
             "default": {
                 "default": "انعطف {modifier}ا",
                 "name": "انعطف {modifier}ا على {way_name}",
-                "destination": "انعطف {modifier}ا نحو {destination}"
+                "destination": "انعطف {modifier}ا نحو {destination}",
+                "junction_name": "انعطف {modifier}ا على {junction_name}"
             },
             "straight": {
                 "default": "تابع قدماً",
                 "name": "تابع إلى الأمام على {way_name}",
-                "destination": "تابع قدماً نحو {destination}"
+                "destination": "تابع قدماً نحو {destination}",
+                "junction_name": "تابع إلى الأمام على {junction_name}"
             },
             "uturn": {
                 "default": "انعطف دوراناً عكسياً عند نهاية الطريق",
                 "name": "انعطف دوراناً عكسياً على {way_name} عند نهاية الطريق",
-                "destination": "انعطف دوراناً عكسياً نحو {destination} عند نهاية الطريق"
+                "destination": "انعطف دوراناً عكسياً نحو {destination} عند نهاية الطريق",
+                "junction_name": "انعطف دوراناً عكسياً نحو {junction_name}"
             }
         },
         "fork": {
@@ -3786,22 +3805,26 @@ module.exports={
             "default": {
                 "default": "انعطف نحو {modifier}",
                 "name": "انعطف {modifier} على {way_name}",
-                "destination": "انعطف {modifier} نحو {destination}"
+                "destination": "انعطف {modifier} نحو {destination}",
+                "junction_name": "انعطف {modifier} على {junction_name}"
             },
             "left": {
                 "default": "انعطف يسارا",
                 "name": "اسلك مسار الدوران يسارا على {way_name}",
-                "destination": "انعطف يسارا نحو {destination}"
+                "destination": "انعطف يسارا نحو {destination}",
+                "junction_name": "اسلك مسار الدوران يسارا على {junction_name}"
             },
             "right": {
                 "default": "انعطف يمينا",
                 "name": "اسلك مسار الدوران يمينا على {way_name}",
-                "destination": "انعطف يمينا نحو {destination}"
+                "destination": "انعطف يمينا نحو {destination}",
+                "junction_name": "اسلك مسار الدوران يمينا على {junction_name}"
             },
             "straight": {
                 "default": "انطلق قدما",
                 "name": "انطلق قدما على {way_name}",
-                "destination": "انطلق قدما نحو {destination}"
+                "destination": "انطلق قدما نحو {destination}",
+                "junction_name": "انطلق قدما على {junction_name}"
             }
         },
         "use lane": {
@@ -3950,27 +3973,32 @@ module.exports={
             "sharp left": {
                 "default": "Drej skarpt til venstre",
                 "name": "Drej skarpt til venstre videre ad {way_name}",
-                "destination": "Drej skarpt til venstre mod {destination}"
+                "destination": "Drej skarpt til venstre mod {destination}",
+                "junction_name": "Drej skarpt til venstre videre ved {junction_name}"
             },
             "sharp right": {
                 "default": "Drej skarpt til højre",
                 "name": "Drej skarpt til højre videre ad {way_name}",
-                "destination": "Drej skarpt til højre mod {destination}"
+                "destination": "Drej skarpt til højre mod {destination}",
+                "junction_name": "Drej skarpt til højre videre ved {junction_name}"
             },
             "slight left": {
                 "default": "Drej let til venstre",
                 "name": "Drej let til venstre videre ad {way_name}",
-                "destination": "Drej let til venstre mod {destination}"
+                "destination": "Drej let til venstre mod {destination}",
+                "junction_name": "Drej let til venstre videre ved {junction_name}"
             },
             "slight right": {
                 "default": "Drej let til højre",
                 "name": "Drej let til højre videre ad {way_name}",
-                "destination": "Drej let til højre mod {destination}"
+                "destination": "Drej let til højre mod {destination}",
+                "junction_name": "Drej let til højre videre ved {junction_name}"
             },
             "uturn": {
                 "default": "Foretag en U-vending",
                 "name": "Foretag en U-vending tilbage ad {way_name}",
-                "destination": "Foretag en U-vending mod {destination}"
+                "destination": "Foretag en U-vending mod {destination}",
+                "junction_name": "Foretag en U-vending tilbage ved {junction_name}"
             }
         },
         "depart": {
@@ -3984,17 +4012,20 @@ module.exports={
             "default": {
                 "default": "{modifier:turn}",
                 "name": "{modifier:turn} ad {way_name}",
-                "destination": "{modifier:turn} mod {destination}"
+                "destination": "{modifier:turn} mod {destination}",
+                "junction_name": "{modifier:turn} ved {junction_name}"
             },
             "straight": {
                 "default": "Fortsæt ligeud",
                 "name": "Fortsæt ligeud ad {way_name}",
-                "destination": "Fortsæt ligeud mod {destination}"
+                "destination": "Fortsæt ligeud mod {destination}",
+                "junction_name": "Fortsæt ligeud ved {junction_name}"
             },
             "uturn": {
                 "default": "Foretag en U-vending for enden af vejen",
                 "name": "Foretag en U-vending ad {way_name} for enden af vejen",
-                "destination": "Foretag en U-vending mod {destination} for enden af vejen"
+                "destination": "Foretag en U-vending mod {destination} for enden af vejen",
+                "junction_name": "Foretag en U-vending ved {junction_name}"
             }
         },
         "fork": {
@@ -4281,22 +4312,26 @@ module.exports={
             "default": {
                 "default": "{modifier:turn}",
                 "name": "{modifier:turn} ad {way_name}",
-                "destination": "{modifier:turn} mod {destination}"
+                "destination": "{modifier:turn} mod {destination}",
+                "junction_name": "{modifier:turn} ved {junction_name}"
             },
             "left": {
                 "default": "Drej til venstre",
                 "name": "Drej til venstre ad {way_name}",
-                "destination": "Drej til venstre mod {destination}"
+                "destination": "Drej til venstre mod {destination}",
+                "junction_name": "Drej til venstre ved {junction_name}"
             },
             "right": {
                 "default": "Drej til højre",
                 "name": "Drej til højre ad {way_name}",
-                "destination": "Drej til højre mod {destination}"
+                "destination": "Drej til højre mod {destination}",
+                "junction_name": "Drej til højre ved {junction_name}"
             },
             "straight": {
                 "default": "Kør ligeud",
                 "name": "Kør ligeud ad {way_name}",
-                "destination": "Kør ligeud mod {destination}"
+                "destination": "Kør ligeud mod {destination}",
+                "junction_name": "Kør ligeud ved {junction_name}"
             }
         },
         "use lane": {
@@ -4445,27 +4480,32 @@ module.exports={
             "sharp left": {
                 "default": "Scharf links",
                 "name": "Scharf links weiterfahren auf {way_name}",
-                "destination": "Scharf links Richtung {destination}"
+                "destination": "Scharf links Richtung {destination}",
+                "junction_name": "Scharf links weiterfahren an {junction_name}"
             },
             "sharp right": {
                 "default": "Scharf rechts",
                 "name": "Scharf rechts weiterfahren auf {way_name}",
-                "destination": "Scharf rechts Richtung {destination}"
+                "destination": "Scharf rechts Richtung {destination}",
+                "junction_name": "Scharf rechts weiterfahren an {junction_name}"
             },
             "slight left": {
                 "default": "Leicht links",
                 "name": "Leicht links weiter auf {way_name}",
-                "destination": "Leicht links weiter Richtung {destination}"
+                "destination": "Leicht links weiter Richtung {destination}",
+                "junction_name": "Leicht links weiter an {junction_name}"
             },
             "slight right": {
                 "default": "Leicht rechts weiter",
                 "name": "Leicht rechts weiter auf {way_name}",
-                "destination": "Leicht rechts weiter Richtung {destination}"
+                "destination": "Leicht rechts weiter Richtung {destination}",
+                "junction_name": "Leicht rechts weiter an {junction_name}"
             },
             "uturn": {
                 "default": "180°-Wendung",
                 "name": "180°-Wendung auf {way_name}",
-                "destination": "180°-Wendung Richtung {destination}"
+                "destination": "180°-Wendung Richtung {destination}",
+                "junction_name": "180°-Wendung an {junction_name}"
             }
         },
         "depart": {
@@ -4479,24 +4519,27 @@ module.exports={
             "default": {
                 "default": "{modifier} abbiegen",
                 "name": "{modifier} abbiegen auf {way_name}",
-                "destination": "{modifier} abbiegen Richtung {destination}"
+                "destination": "{modifier} abbiegen Richtung {destination}",
+                "junction_name": "{modifier} abbiegen an {junction_name}"
             },
             "straight": {
                 "default": "Geradeaus weiterfahren",
                 "name": "Geradeaus weiterfahren auf {way_name}",
-                "destination": "Geradeaus weiterfahren Richtung {destination}"
+                "destination": "Geradeaus weiterfahren Richtung {destination}",
+                "junction_name": "Geradeaus weiterfahren an {junction_name}"
             },
             "uturn": {
                 "default": "180°-Wendung am Ende der Straße",
                 "name": "180°-Wendung auf {way_name} am Ende der Straße",
-                "destination": "180°-Wendung Richtung {destination} am Ende der Straße"
+                "destination": "180°-Wendung Richtung {destination} am Ende der Straße",
+                "junction_name": "180°-Wendung an {junction_name}"
             }
         },
         "fork": {
             "default": {
                 "default": "{modifier} halten an der Gabelung",
                 "name": "{modifier} halten an der Gabelung auf {way_name}",
-                "destination": "{modifier}  halten an der Gabelung Richtung {destination}"
+                "destination": "{modifier} halten an der Gabelung Richtung {destination}"
             },
             "slight left": {
                 "default": "Links halten an der Gabelung",
@@ -4806,22 +4849,26 @@ module.exports={
             "default": {
                 "default": "{modifier} abbiegen",
                 "name": "{modifier} abbiegen auf {way_name}",
-                "destination": "{modifier} abbiegen Richtung {destination}"
+                "destination": "{modifier} abbiegen Richtung {destination}",
+                "junction_name": "Make a {modifier} at {junction_name}"
             },
             "left": {
                 "default": "Links abbiegen",
                 "name": "Links abbiegen auf {way_name}",
-                "destination": "Links abbiegen Richtung {destination}"
+                "destination": "Links abbiegen Richtung {destination}",
+                "junction_name": "Links abbiegen an {junction_name}"
             },
             "right": {
                 "default": "Rechts abbiegen",
                 "name": "Rechts abbiegen auf {way_name}",
-                "destination": "Rechts abbiegen Richtung {destination}"
+                "destination": "Rechts abbiegen Richtung {destination}",
+                "junction_name": "Rechts abbiegen an {junction_name}"
             },
             "straight": {
                 "default": "Geradeaus weiterfahren",
                 "name": "Geradeaus weiterfahren auf {way_name}",
-                "destination": "Geradeaus weiterfahren Richtung {destination}"
+                "destination": "Geradeaus weiterfahren Richtung {destination}",
+                "junction_name": "Geradeaus weiterfahren an {junction_name}"
             }
         },
         "use lane": {
@@ -4970,27 +5017,32 @@ module.exports={
             "sharp left": {
                 "default": "Make a sharp left",
                 "name": "Make a sharp left to stay on {way_name}",
-                "destination": "Make a sharp left towards {destination}"
+                "destination": "Make a sharp left towards {destination}",
+                "junction_name": "Make a sharp left at {junction_name}"
             },
             "sharp right": {
                 "default": "Make a sharp right",
                 "name": "Make a sharp right to stay on {way_name}",
-                "destination": "Make a sharp right towards {destination}"
+                "destination": "Make a sharp right towards {destination}",
+                "junction_name": "Make a sharp right at {junction_name}"
             },
             "slight left": {
                 "default": "Make a slight left",
                 "name": "Make a slight left to stay on {way_name}",
-                "destination": "Make a slight left towards {destination}"
+                "destination": "Make a slight left towards {destination}",
+                "junction_name": "Make a slight left at {junction_name}"
             },
             "slight right": {
                 "default": "Make a slight right",
                 "name": "Make a slight right to stay on {way_name}",
-                "destination": "Make a slight right towards {destination}"
+                "destination": "Make a slight right towards {destination}",
+                "junction_name": "Make a slight right at {junction_name}"
             },
             "uturn": {
                 "default": "Make a U-turn",
                 "name": "Make a U-turn and continue on {way_name}",
-                "destination": "Make a U-turn towards {destination}"
+                "destination": "Make a U-turn towards {destination}",
+                "junction_name": "Make a U-turn at {junction_name}"
             }
         },
         "depart": {
@@ -5004,17 +5056,20 @@ module.exports={
             "default": {
                 "default": "Turn {modifier}",
                 "name": "Turn {modifier} onto {way_name}",
-                "destination": "Turn {modifier} towards {destination}"
+                "destination": "Turn {modifier} towards {destination}",
+                "junction_name": "Turn {modifier} at {junction_name}"
             },
             "straight": {
                 "default": "Continue straight",
                 "name": "Continue straight onto {way_name}",
-                "destination": "Continue straight towards {destination}"
+                "destination": "Continue straight towards {destination}",
+                "junction_name": "Continue straight at {junction_name}"
             },
             "uturn": {
                 "default": "Make a U-turn at the end of the road",
                 "name": "Make a U-turn onto {way_name} at the end of the road",
-                "destination": "Make a U-turn towards {destination} at the end of the road"
+                "destination": "Make a U-turn towards {destination} at the end of the road",
+                "junction_name": "Make a U-turn at {junction_name}"
             }
         },
         "fork": {
@@ -5301,22 +5356,26 @@ module.exports={
             "default": {
                 "default": "Make a {modifier}",
                 "name": "Make a {modifier} onto {way_name}",
-                "destination": "Make a {modifier} towards {destination}"
+                "destination": "Make a {modifier} towards {destination}",
+                "junction_name": "Make a {modifier} at {junction_name}"
             },
             "left": {
                 "default": "Turn left",
                 "name": "Turn left onto {way_name}",
-                "destination": "Turn left towards {destination}"
+                "destination": "Turn left towards {destination}",
+                "junction_name": "Turn left at {junction_name}"
             },
             "right": {
                 "default": "Turn right",
                 "name": "Turn right onto {way_name}",
-                "destination": "Turn right towards {destination}"
+                "destination": "Turn right towards {destination}",
+                "junction_name": "Turn right at {junction_name}"
             },
             "straight": {
                 "default": "Go straight",
                 "name": "Go straight onto {way_name}",
-                "destination": "Go straight towards {destination}"
+                "destination": "Go straight towards {destination}",
+                "junction_name": "Go straight at {junction_name}"
             }
         },
         "use lane": {
@@ -5465,27 +5524,32 @@ module.exports={
             "sharp left": {
                 "default": "Turniĝu ege maldekstren",
                 "name": "Turniĝu ege maldekstren al {way_name}",
-                "destination": "Turniĝu ege maldekstren direkte al {destination}"
+                "destination": "Turniĝu ege maldekstren direkte al {destination}",
+                "junction_name": "Turniĝu ege maldekstren ĉe {junction_name}"
             },
             "sharp right": {
                 "default": "Turniĝu ege dekstren",
                 "name": "Turniĝu ege dekstren al {way_name}",
-                "destination": "Turniĝu ege dekstren direkte al {destination}"
+                "destination": "Turniĝu ege dekstren direkte al {destination}",
+                "junction_name": "Turniĝu ege dekstren ĉe {junction_name}"
             },
             "slight left": {
                 "default": "Turniĝu ete maldekstren",
                 "name": "Turniĝu ete maldekstren al {way_name}",
-                "destination": "Turniĝu ete maldekstren direkte al {destination}"
+                "destination": "Turniĝu ete maldekstren direkte al {destination}",
+                "junction_name": "Turniĝu ete maldekstren ĉe {junction_name}"
             },
             "slight right": {
                 "default": "Turniĝu ete dekstren",
                 "name": "Turniĝu ete dekstren al {way_name}",
-                "destination": "Turniĝu ete dekstren direkte al {destination}"
+                "destination": "Turniĝu ete dekstren direkte al {destination}",
+                "junction_name": "Turniĝu ete dekstren ĉe {junction_name}"
             },
             "uturn": {
                 "default": "Turniĝu malantaŭen",
                 "name": "Turniĝu malantaŭen al {way_name}",
-                "destination": "Turniĝu malantaŭen direkte al {destination}"
+                "destination": "Turniĝu malantaŭen direkte al {destination}",
+                "junction_name": "Turniĝu malantaŭen ĉe {junction_name}"
             }
         },
         "depart": {
@@ -5499,17 +5563,20 @@ module.exports={
             "default": {
                 "default": "Veturu {modifier}",
                 "name": "Veturu {modifier} direkte al {way_name}",
-                "destination": "Veturu {modifier} direkte al {destination}"
+                "destination": "Veturu {modifier} direkte al {destination}",
+                "junction_name": "Veturu {modifier} ĉe {junction_name}"
             },
             "straight": {
                 "default": "Veturu rekten",
                 "name": "Veturu rekten al {way_name}",
-                "destination": "Veturu rekten direkte al {destination}"
+                "destination": "Veturu rekten direkte al {destination}",
+                "junction_name": "Veturu rekten ĉe {junction_name}"
             },
             "uturn": {
                 "default": "Turniĝu malantaŭen ĉe fino de la vojo",
                 "name": "Turniĝu malantaŭen al {way_name} ĉe fino de la vojo",
-                "destination": "Turniĝu malantaŭen direkte al {destination} ĉe fino de la vojo"
+                "destination": "Turniĝu malantaŭen direkte al {destination} ĉe fino de la vojo",
+                "junction_name": "Turniĝu malantaŭen ĉe {junction_name}"
             }
         },
         "fork": {
@@ -5796,22 +5863,26 @@ module.exports={
             "default": {
                 "default": "Veturu {modifier}",
                 "name": "Veturu {modifier} al {way_name}",
-                "destination": "Veturu {modifier} direkte al {destination}"
+                "destination": "Veturu {modifier} direkte al {destination}",
+                "junction_name": "Veturu {modifier} ĉe {junction_name}"
             },
             "left": {
                 "default": "Turniĝu maldekstren",
                 "name": "Turniĝu maldekstren al {way_name}",
-                "destination": "Turniĝu maldekstren direkte al {destination}"
+                "destination": "Turniĝu maldekstren direkte al {destination}",
+                "junction_name": "Turniĝu maldekstren ĉe {junction_name}"
             },
             "right": {
                 "default": "Turniĝu dekstren",
                 "name": "Turniĝu dekstren al {way_name}",
-                "destination": "Turniĝu dekstren direkte al {destination}"
+                "destination": "Turniĝu dekstren direkte al {destination}",
+                "junction_name": "Turniĝu dekstren ĉe {junction_name}"
             },
             "straight": {
                 "default": "Veturu rekten",
                 "name": "Veturu rekten al {way_name}",
-                "destination": "Veturu rekten direkte al {destination}"
+                "destination": "Veturu rekten direkte al {destination}",
+                "junction_name": "Veturu rekten ĉe {junction_name}"
             }
         },
         "use lane": {
@@ -5960,27 +6031,32 @@ module.exports={
             "sharp left": {
                 "default": "Gire a la izquierda",
                 "name": "Gire a la izquierda en {way_name}",
-                "destination": "Gire a la izquierda hacia {destination}"
+                "destination": "Gire a la izquierda hacia {destination}",
+                "junction_name": "Gire a la izquierda en {junction_name}"
             },
             "sharp right": {
                 "default": "Gire a la derecha",
                 "name": "Gire a la derecha en {way_name}",
-                "destination": "Gire a la derecha hacia {destination}"
+                "destination": "Gire a la derecha hacia {destination}",
+                "junction_name": "Gire a la derecha en {junction_name}"
             },
             "slight left": {
                 "default": "Gire a la izquierda",
                 "name": "Doble levemente a la izquierda en {way_name}",
-                "destination": "Gire a la izquierda hacia {destination}"
+                "destination": "Gire a la izquierda hacia {destination}",
+                "junction_name": "Doble levemente a la izquierda en {junction_name}"
             },
             "slight right": {
                 "default": "Gire a la izquierda",
                 "name": "Doble levemente a la derecha en {way_name}",
-                "destination": "Gire a la izquierda hacia {destination}"
+                "destination": "Gire a la izquierda hacia {destination}",
+                "junction_name": "Doble levemente a la derecha en {junction_name}"
             },
             "uturn": {
                 "default": "Haz un cambio de sentido",
                 "name": "Haz un cambio de sentido y continúa en {way_name}",
-                "destination": "Haz un cambio de sentido hacia {destination}"
+                "destination": "Haz un cambio de sentido hacia {destination}",
+                "junction_name": "Haz un cambio de sentido en {junction_name}"
             }
         },
         "depart": {
@@ -5994,17 +6070,20 @@ module.exports={
             "default": {
                 "default": "Al final de la calle gira {modifier}",
                 "name": "Al final de la calle gira {modifier} por {way_name}",
-                "destination": "Al final de la calle gira {modifier} hacia {destination}"
+                "destination": "Al final de la calle gira {modifier} hacia {destination}",
+                "junction_name": "Al final de la calle gira {modifier} en {junction_name}"
             },
             "straight": {
                 "default": "Al final de la calle continúa recto",
                 "name": "Al final de la calle continúa recto por {way_name}",
-                "destination": "Al final de la calle continúa recto hacia {destination}"
+                "destination": "Al final de la calle continúa recto hacia {destination}",
+                "junction_name": "Al final de la calle continúa recto en {junction_name}"
             },
             "uturn": {
                 "default": "Al final de la calle haz un cambio de sentido",
                 "name": "Al final de la calle haz un cambio de sentido en {way_name}",
-                "destination": "Al final de la calle haz un cambio de sentido hacia {destination}"
+                "destination": "Al final de la calle haz un cambio de sentido hacia {destination}",
+                "junction_name": "Haz un cambio de sentido en {junction_name}"
             }
         },
         "fork": {
@@ -6291,22 +6370,26 @@ module.exports={
             "default": {
                 "default": "Gira {modifier}",
                 "name": "Gira {modifier} por {way_name}",
-                "destination": "Gira {modifier} hacia {destination}"
+                "destination": "Gira {modifier} hacia {destination}",
+                "junction_name": "Gira {modifier} en {junction_name}"
             },
             "left": {
                 "default": "Gira a la izquierda",
                 "name": "Gira a la izquierda por {way_name}",
-                "destination": "Gira a la izquierda hacia {destination}"
+                "destination": "Gira a la izquierda hacia {destination}",
+                "junction_name": "Gira a la izquierda en {junction_name}"
             },
             "right": {
                 "default": "Gira a la derecha",
                 "name": "Gira a la derecha por {way_name}",
-                "destination": "Gira a la derecha hacia {destination}"
+                "destination": "Gira a la derecha hacia {destination}",
+                "junction_name": "Gira a la derecha en junction_name}"
             },
             "straight": {
                 "default": "Continúa recto",
                 "name": "Continúa recto por {way_name}",
-                "destination": "Continúa recto hacia {destination}"
+                "destination": "Continúa recto hacia {destination}",
+                "junction_name": "Continúa recto en {junction_name}"
             }
         },
         "use lane": {
@@ -6455,27 +6538,32 @@ module.exports={
             "sharp left": {
                 "default": "Gira a la izquierda",
                 "name": "Gira a la izquierda en {way_name}",
-                "destination": "Gira a la izquierda hacia {destination}"
+                "destination": "Gira a la izquierda hacia {destination}",
+                "junction_name": "Gira a la izquierda en {junction_name}"
             },
             "sharp right": {
                 "default": "Gira a la derecha",
                 "name": "Gira a la derecha en {way_name}",
-                "destination": "Gira a la derecha hacia {destination}"
+                "destination": "Gira a la derecha hacia {destination}",
+                "junction_name": "Gira a la derecha en {junction_name}"
             },
             "slight left": {
                 "default": "Gira a la izquierda",
                 "name": "Dobla levemente a la izquierda en {way_name}",
-                "destination": "Gira a la izquierda hacia {destination}"
+                "destination": "Gira a la izquierda hacia {destination}",
+                "junction_name": "Dobla levemente a la izquierda en {junction_name}"
             },
             "slight right": {
                 "default": "Gira a la izquierda",
                 "name": "Dobla levemente a la derecha en {way_name}",
-                "destination": "Gira a la izquierda hacia {destination}"
+                "destination": "Gira a la izquierda hacia {destination}",
+                "junction_name": "Dobla levemente a la derecha en {junction_name}"
             },
             "uturn": {
                 "default": "Haz un cambio de sentido",
                 "name": "Haz un cambio de sentido y continúa en {way_name}",
-                "destination": "Haz un cambio de sentido hacia {destination}"
+                "destination": "Haz un cambio de sentido hacia {destination}",
+                "junction_name": "Haz un cambio de sentido en {junction_name}"
             }
         },
         "depart": {
@@ -6487,24 +6575,27 @@ module.exports={
         },
         "end of road": {
             "default": {
-                "default": "Gira  a {modifier}",
+                "default": "Gira a {modifier}",
                 "name": "Gira a {modifier} en {way_name}",
-                "destination": "Gira a {modifier} hacia {destination}"
+                "destination": "Gira a {modifier} hacia {destination}",
+                "junction_name": "Gira a {modifier} en {junction_name}"
             },
             "straight": {
                 "default": "Continúa recto",
                 "name": "Continúa recto en {way_name}",
-                "destination": "Continúa recto hacia {destination}"
+                "destination": "Continúa recto hacia {destination}",
+                "junction_name": "Continúa recto en {junction_name}"
             },
             "uturn": {
                 "default": "Haz un cambio de sentido al final de la via",
                 "name": "Haz un cambio de sentido en {way_name} al final de la via",
-                "destination": "Haz un cambio de sentido hacia {destination} al final de la via"
+                "destination": "Haz un cambio de sentido hacia {destination} al final de la via",
+                "junction_name": "Haz un cambio de sentido en {junction_name}"
             }
         },
         "fork": {
             "default": {
-                "default": "Mantente  {modifier} en el cruza",
+                "default": "Mantente {modifier} en el cruza",
                 "name": "Mantente {modifier} en {way_name}",
                 "destination": "Mantente {modifier} hacia {destination}"
             },
@@ -6786,22 +6877,26 @@ module.exports={
             "default": {
                 "default": "Sigue {modifier}",
                 "name": "Sigue {modifier} en {way_name}",
-                "destination": "Sigue {modifier} hacia {destination}"
+                "destination": "Sigue {modifier} hacia {destination}",
+                "junction_name": "Sigue {modifier} en {junction_name}"
             },
             "left": {
                 "default": "Gira a la izquierda",
                 "name": "Gira a la izquierda en {way_name}",
-                "destination": "Gira a la izquierda hacia {destination}"
+                "destination": "Gira a la izquierda hacia {destination}",
+                "junction_name": "Gira a la izquierda en {junction_name}"
             },
             "right": {
                 "default": "Gira a la derecha",
                 "name": "Gira a la derecha en {way_name}",
-                "destination": "Gira a la derecha hacia {destination}"
+                "destination": "Gira a la derecha hacia {destination}",
+                "junction_name": "Gira a la derecha en {junction_name}"
             },
             "straight": {
                 "default": "Ve recto",
                 "name": "Ve recto en {way_name}",
-                "destination": "Ve recto hacia {destination}"
+                "destination": "Ve recto hacia {destination}",
+                "junction_name": "Ve recto en {junction_name}"
             }
         },
         "use lane": {
@@ -6950,27 +7045,32 @@ module.exports={
             "sharp left": {
                 "default": "Jatka jyrkästi vasempaan",
                 "name": "Jatka jyrkästi vasempaan pysyäksesi tiellä {way_name}",
-                "destination": "Jatka jyrkästi vasempaan suuntana {destination}"
+                "destination": "Jatka jyrkästi vasempaan suuntana {destination}",
+                "junction_name": "Jatka jyrkästi vasempaan tielle {junction_name}"
             },
             "sharp right": {
                 "default": "Jatka jyrkästi oikeaan",
                 "name": "Jatka jyrkästi oikeaan pysyäksesi tiellä {way_name}",
-                "destination": "Jatka jyrkästi oikeaan suuntana {destination}"
+                "destination": "Jatka jyrkästi oikeaan suuntana {destination}",
+                "junction_name": "Jatka jyrkästi oikeaan tielle {junction_name}"
             },
             "slight left": {
                 "default": "Jatka loivasti vasempaan",
                 "name": "Jatka loivasti vasempaan pysyäksesi tiellä {way_name}",
-                "destination": "Jatka loivasti vasempaan suuntana {destination}"
+                "destination": "Jatka loivasti vasempaan suuntana {destination}",
+                "junction_name": "Jatka loivasti vasempaan tielle {junction_name}"
             },
             "slight right": {
                 "default": "Jatka loivasti oikeaan",
                 "name": "Jatka loivasti oikeaan pysyäksesi tiellä {way_name}",
-                "destination": "Jatka loivasti oikeaan suuntana {destination}"
+                "destination": "Jatka loivasti oikeaan suuntana {destination}",
+                "junction_name": "Jatka loivasti oikeaan tielle {junction_name}"
             },
             "uturn": {
                 "default": "Tee U-käännös",
                 "name": "Tee U-käännös ja jatka tietä {way_name}",
-                "destination": "Tee U-käännös suuntana {destination}"
+                "destination": "Tee U-käännös suuntana {destination}",
+                "junction_name": "Tee U-käännös tielle {junction_name}"
             }
         },
         "depart": {
@@ -6984,17 +7084,20 @@ module.exports={
             "default": {
                 "default": "Käänny {modifier}",
                 "name": "Käänny {modifier} tielle {way_name}",
-                "destination": "Käänny {modifier} suuntana {destination}"
+                "destination": "Käänny {modifier} suuntana {destination}",
+                "junction_name": "Käänny {modifier} tielle {junction_name}"
             },
             "straight": {
                 "default": "Jatka suoraan eteenpäin",
                 "name": "Jatka suoraan eteenpäin tielle {way_name}",
-                "destination": "Jatka suoraan eteenpäin suuntana {destination}"
+                "destination": "Jatka suoraan eteenpäin suuntana {destination}",
+                "junction_name": "Jatka suoraan eteenpäin tielle {junction_name}"
             },
             "uturn": {
                 "default": "Tien päässä tee U-käännös",
                 "name": "Tien päässä tee U-käännös tielle {way_name}",
-                "destination": "Tien päässä tee U-käännös suuntana {destination}"
+                "destination": "Tien päässä tee U-käännös suuntana {destination}",
+                "junction_name": "Tien päässä tee U-käännös tielle {junction_name}"
             }
         },
         "fork": {
@@ -7281,22 +7384,26 @@ module.exports={
             "default": {
                 "default": "Käänny {modifier}",
                 "name": "Käänny {modifier} tielle {way_name}",
-                "destination": "Käänny {modifier} suuntana {destination}"
+                "destination": "Käänny {modifier} suuntana {destination}",
+                "junction_name": "Käänny {modifier} {junction_name}"
             },
             "left": {
                 "default": "Käänny vasempaan",
                 "name": "Käänny vasempaan tielle {way_name}",
-                "destination": "Käänny vasempaan suuntana {destination}"
+                "destination": "Käänny vasempaan suuntana {destination}",
+                "junction_name": "Käänny vasemmalle {junction_name}"
             },
             "right": {
                 "default": "Käänny oikeaan",
                 "name": "Käänny oikeaan tielle {way_name}",
-                "destination": "Käänny oikeaan suuntana {destination}"
+                "destination": "Käänny oikeaan suuntana {destination}",
+                "junction_name": "Käänny oikealle {junction_name}"
             },
             "straight": {
                 "default": "Aja suoraan eteenpäin",
                 "name": "Aja suoraan eteenpäin tielle {way_name}",
-                "destination": "Aja suoraan eteenpäin suuntana {destination}"
+                "destination": "Aja suoraan eteenpäin suuntana {destination}",
+                "junction_name": "Aja suoraan eteenpäin {junction_name}"
             }
         },
         "use lane": {
@@ -7445,27 +7552,32 @@ module.exports={
             "sharp left": {
                 "default": "Tourner franchement à gauche",
                 "name": "Tourner franchement à gauche pour rester sur {way_name:article}",
-                "destination": "Tourner franchement à gauche en direction {destination:preposition}"
+                "destination": "Tourner franchement à gauche en direction {destination:preposition}",
+                "junction_name": "Tourner franchement à gauche en {junction_name}"
             },
             "sharp right": {
                 "default": "Tourner franchement à droite",
                 "name": "Tourner franchement à droite pour rester sur {way_name:article}",
-                "destination": "Tourner franchement à droite en direction {destination:preposition}"
+                "destination": "Tourner franchement à droite en direction {destination:preposition}",
+                "junction_name": "Tourner franchement à droite en {junction_name}"
             },
             "slight left": {
                 "default": "Tourner légèrement à gauche",
                 "name": "Tourner légèrement à gauche pour rester sur {way_name:article}",
-                "destination": "Tourner légèrement à gauche en direction {destination:preposition}"
+                "destination": "Tourner légèrement à gauche en direction {destination:preposition}",
+                "junction_name": "Tourner légèrement à gauche en {junction_name}"
             },
             "slight right": {
                 "default": "Tourner légèrement à droite",
                 "name": "Tourner légèrement à droite pour rester sur {way_name:article}",
-                "destination": "Tourner légèrement à droite en direction {destination:preposition}"
+                "destination": "Tourner légèrement à droite en direction {destination:preposition}",
+                "junction_name": "Tourner légèrement à droite en {junction_name}"
             },
             "uturn": {
                 "default": "Faire demi-tour",
                 "name": "Faire demi-tour et continuer sur {way_name:article}",
-                "destination": "Faire demi-tour en direction {destination:preposition}"
+                "destination": "Faire demi-tour en direction {destination:preposition}",
+                "junction_name": "Faire demi-tour en {junction_name}"
             }
         },
         "depart": {
@@ -7479,17 +7591,20 @@ module.exports={
             "default": {
                 "default": "Tourner {modifier}",
                 "name": "Tourner {modifier} sur {way_name:article}",
-                "destination": "Tourner {modifier} en direction {destination:preposition}"
+                "destination": "Tourner {modifier} en direction {destination:preposition}",
+                "junction_name": "Tourner {modifier} en {junction_name}"
             },
             "straight": {
                 "default": "Continuer tout droit",
                 "name": "Continuer tout droit sur {way_name:article}",
-                "destination": "Continuer tout droit en direction {destination:preposition}"
+                "destination": "Continuer tout droit en direction {destination:preposition}",
+                "junction_name": "Continuer tout droit en {junction_name}"
             },
             "uturn": {
                 "default": "Faire demi-tour à la fin de la route",
                 "name": "Faire demi-tour à la fin {way_name:preposition}",
-                "destination": "Faire demi-tour à la fin de la route en direction {destination:preposition}"
+                "destination": "Faire demi-tour à la fin de la route en direction {destination:preposition}",
+                "junction_name": "Faire demi-tour en {junction_name}"
             }
         },
         "fork": {
@@ -7776,22 +7891,26 @@ module.exports={
             "default": {
                 "default": "Tourner {modifier}",
                 "name": "Tourner {modifier} sur {way_name:article}",
-                "destination": "Tourner {modifier} en direction {destination:preposition}"
+                "destination": "Tourner {modifier} en direction {destination:preposition}",
+                "junction_name": "Tourner {modifier} en {junction_name}"
             },
             "left": {
                 "default": "Tourner à gauche",
                 "name": "Tourner à gauche sur {way_name:article}",
-                "destination": "Tourner à gauche en direction {destination:preposition}"
+                "destination": "Tourner à gauche en direction {destination:preposition}",
+                "junction_name": "Tourner à gauche en {junction_name}"
             },
             "right": {
                 "default": "Tourner à droite",
                 "name": "Tourner à droite sur {way_name:article}",
-                "destination": "Tourner à droite en direction {destination:preposition}"
+                "destination": "Tourner à droite en direction {destination:preposition}",
+                "junction_name": "Tourner à droite en {junction_name}"
             },
             "straight": {
                 "default": "Aller tout droit",
                 "name": "Aller tout droit sur {way_name:article}",
-                "destination": "Aller tout droit en direction {destination:preposition}"
+                "destination": "Aller tout droit en direction {destination:preposition}",
+                "junction_name": "Aller tout droit en {junction_name}"
             }
         },
         "use lane": {
@@ -7940,27 +8059,32 @@ module.exports={
             "sharp left": {
                 "default": "פנה בחדות שמאלה",
                 "name": "פנה בחדות שמאלה כדי להישאר על {way_name}",
-                "destination": "פנה בחדות שמאלה לכיוון {destination}"
+                "destination": "פנה בחדות שמאלה לכיוון {destination}",
+                "junction_name": "פנה בחדות שמאלה כדי להישאר על {junction_name}"
             },
             "sharp right": {
                 "default": "פנה בחדות ימינה",
                 "name": "פנה בחדות ימינה כדי להישאר על {way_name}",
-                "destination": "פנה בחדות ימינה לכיוון {destination}"
+                "destination": "פנה בחדות ימינה לכיוון {destination}",
+                "junction_name": "פנה בחדות ימינה כדי להישאר על {junction_name}"
             },
             "slight left": {
                 "default": "פנה קלות שמאלה",
                 "name": "פנה קלות שמאלה כדי להישאר על {way_name}",
-                "destination": "פנה קלות שמאלה לכיוון {destination}"
+                "destination": "פנה קלות שמאלה לכיוון {destination}",
+                "junction_name": "פנה קלות שמאלה כדי להישאר על {junction_name}"
             },
             "slight right": {
                 "default": "פנה קלות ימינה",
                 "name": "פנה קלות ימינה כדי להישאר על {way_name}",
-                "destination": "פנה קלות ימינה לכיוון {destination}"
+                "destination": "פנה קלות ימינה לכיוון {destination}",
+                "junction_name": "פנה קלות ימינה כדי להישאר על {junction_name}"
             },
             "uturn": {
                 "default": "פנה פניית פרסה",
                 "name": "פנה פניית פרסה והמשך על {way_name}",
-                "destination": "פנה פניית פרסה לכיוון {destination}"
+                "destination": "פנה פניית פרסה לכיוון {destination}",
+                "junction_name": "פנה פניית פרסה והמשך על {junction_name}"
             }
         },
         "depart": {
@@ -7974,17 +8098,20 @@ module.exports={
             "default": {
                 "default": "פנה {modifier}",
                 "name": "פנה {modifier} על {way_name}",
-                "destination": "פנה {modifier} לכיוון {destination}"
+                "destination": "פנה {modifier} לכיוון {destination}",
+                "junction_name": "פנה {modifier} על {junction_name}"
             },
             "straight": {
                 "default": "המשך ישר",
                 "name": "המשך ישר על {way_name}",
-                "destination": "המשך ישר לכיוון {destination}"
+                "destination": "המשך ישר לכיוון {destination}",
+                "junction_name": "המשך ישר על {junction_name}"
             },
             "uturn": {
                 "default": "פנה פניית פרסה בסוף הדרך",
                 "name": "פנה פניית פרסה על {way_name} בסוף הדרך",
-                "destination": "פנה פניית פרסה לכיוון {destination} בסוף הדרך"
+                "destination": "פנה פניית פרסה לכיוון {destination} בסוף הדרך",
+                "junction_name": "פנה פניית פרסה על {junction_name} בסוף הדרך"
             }
         },
         "fork": {
@@ -8271,22 +8398,26 @@ module.exports={
             "default": {
                 "default": "פנה {modifier}",
                 "name": "פנה {modifier} על {way_name}",
-                "destination": "פנה {modifier} לכיוון {destination}"
+                "destination": "פנה {modifier} לכיוון {destination}",
+                "junction_name": "פנה {modifier} על {junction_name}"
             },
             "left": {
                 "default": "פנה שמאלה",
                 "name": "פנה שמאלה ל{way_name}",
-                "destination": "פנה שמאלה לכיוון {destination}"
+                "destination": "פנה שמאלה לכיוון {destination}",
+                "junction_name": "פנה שמאלה ל{junction_name}"
             },
             "right": {
                 "default": "פנה ימינה",
                 "name": "פנה ימינה ל{way_name}",
-                "destination": "פנה ימינה לכיוון {destination}"
+                "destination": "פנה ימינה לכיוון {destination}",
+                "junction_name": "פנה ימינה ל{junction_name}"
             },
             "straight": {
                 "default": "המשך ישר",
                 "name": "המשך ישר ל{way_name}",
-                "destination": "המשך ישר לכיוון {destination}"
+                "destination": "המשך ישר לכיוון {destination}",
+                "junction_name": "המשך ישר ל{junction_name}"
             }
         },
         "use lane": {
@@ -8435,27 +8566,32 @@ module.exports={
             "sharp left": {
                 "default": "Forduljon élesen balra",
                 "name": "Forduljon élesen balra, majd maradjon {way_name:superessive}",
-                "destination": "Forduljon élesen balra {destination:sublative_toward}"
+                "destination": "Forduljon élesen balra {destination:sublative_toward}",
+                "junction_name": "Forduljon élesen balra az {junction_name}"
             },
             "sharp right": {
                 "default": "Forduljon élesen jobbra",
                 "name": "Forduljon élesen jobbra, majd maradjon {way_name:superessive}",
-                "destination": "Forduljon élesen balra {destination:sublative_toward}"
+                "destination": "Forduljon élesen balra {destination:sublative_toward}",
+                "junction_name": "Forduljon élesen jobbra az {junction_name}"
             },
             "slight left": {
                 "default": "Forduljon enyhén balra",
                 "name": "Forduljon enyhén balra, majd maradjon {way_name:superessive}",
-                "destination": "Forduljon enyhén balra {destination:sublative_toward}"
+                "destination": "Forduljon enyhén balra {destination:sublative_toward}",
+                "junction_name": "Forduljon enyhén balra az {junction_name}"
             },
             "slight right": {
                 "default": "Forduljon enyhén jobbra",
                 "name": "Forduljon enyhén jobbra, majd maradjon {way_name:superessive}",
-                "destination": "Forduljon enyhén jobbra {destination:sublative_toward}"
+                "destination": "Forduljon enyhén jobbra {destination:sublative_toward}",
+                "junction_name": "Forduljon enyhén jobbra az {junction_name}"
             },
             "uturn": {
                 "default": "Forduljon vissza",
                 "name": "Forduljon vissza, majd folytassa {way_name:superessive}",
-                "destination": "Forduljon vissza {destination:sublative_toward}"
+                "destination": "Forduljon vissza {destination:sublative_toward}",
+                "junction_name": "Forduljon vissza az {junction_name}"
             }
         },
         "depart": {
@@ -8469,17 +8605,20 @@ module.exports={
             "default": {
                 "default": "Forduljon {modifier}",
                 "name": "Forduljon be {modifier} {way_name:sublative_toward}",
-                "destination": "Forduljon {modifier} {destination:sublative_to}"
+                "destination": "Forduljon {modifier} {destination:sublative_to}",
+                "junction_name": "Forduljon be {modifier} az {junction_name}"
             },
             "straight": {
                 "default": "Hajtson tovább egyenesen",
                 "name": "Hajtson tovább egyenesen {way_name:sublative_to}",
-                "destination": "Hajtson tovább egyenesen {destination:sublative_toward}"
+                "destination": "Hajtson tovább egyenesen {destination:sublative_toward}",
+                "junction_name": "Hajtson tovább egyenesen az {junction_name}"
             },
             "uturn": {
                 "default": "Forduljon vissza az út végén",
                 "name": "Forduljon vissza {way_name:article} végén",
-                "destination": "Forduljon vissza {destination:article} irányában az út végén"
+                "destination": "Forduljon vissza {destination:article} irányában az út végén",
+                "junction_name": "Forduljon vissza az {junction_name}"
             }
         },
         "fork": {
@@ -8766,22 +8905,26 @@ module.exports={
             "default": {
                 "default": "Forduljon {modifier}",
                 "name": "Forduljon be {modifier} {way_name:sublative_to}",
-                "destination": "Forduljon {modifier} {destination:sublative_toward}"
+                "destination": "Forduljon {modifier} {destination:sublative_toward}",
+                "junction_name": "Forduljon be {modifier} az {junction_name}"
             },
             "left": {
                 "default": "Forduljon balra",
                 "name": "Forduljon be balra {way_name:sublative_toward}",
-                "destination": "Forduljon balra {destination:sublative_toward}"
+                "destination": "Forduljon balra {destination:sublative_toward}",
+                "junction_name": "Forduljon be balra az {junction_name}"
             },
             "right": {
                 "default": "Forduljon jobbra",
                 "name": "Forduljon be jobbra {way_name:sublative_to}",
-                "destination": "Forduljon jobbra {destination:sublative_toward}"
+                "destination": "Forduljon jobbra {destination:sublative_toward}",
+                "junction_name": "Forduljon be jobbra az {junction_name}"
             },
             "straight": {
                 "default": "Hajtson egyenesen",
                 "name": "Hajtson egyenesen {way_name:sublative_to}",
-                "destination": "Hajtson egyenesen {destination:sublative_toward}"
+                "destination": "Hajtson egyenesen {destination:sublative_toward}",
+                "junction_name": "Hajtson egyenese az {junction_name}"
             }
         },
         "use lane": {
@@ -8930,27 +9073,32 @@ module.exports={
             "sharp left": {
                 "default": "Belok kiri tajam",
                 "name": "Make a sharp left to stay on {way_name}",
-                "destination": "Belok kiri tajam menuju {destination}"
+                "destination": "Belok kiri tajam menuju {destination}",
+                "junction_name": "Make a sharp left at {junction_name}"
             },
             "sharp right": {
                 "default": "Belok kanan tajam",
                 "name": "Make a sharp right to stay on {way_name}",
-                "destination": "Belok kanan tajam menuju {destination}"
+                "destination": "Belok kanan tajam menuju {destination}",
+                "junction_name": "Make a sharp right at {junction_name}"
             },
             "slight left": {
                 "default": "Tetap agak di kiri",
                 "name": "Tetap agak di kiri ke {way_name}",
-                "destination": "Tetap agak di kiri menuju {destination}"
+                "destination": "Tetap agak di kiri menuju {destination}",
+                "junction_name": "Make a slight left at {junction_name}"
             },
             "slight right": {
                 "default": "Tetap agak di kanan",
                 "name": "Tetap agak di kanan ke {way_name}",
-                "destination": "Tetap agak di kanan menuju {destination}"
+                "destination": "Tetap agak di kanan menuju {destination}",
+                "junction_name": "Make a slight right at {junction_name}"
             },
             "uturn": {
                 "default": "Putar balik",
                 "name": "Putar balik ke arah {way_name}",
-                "destination": "Putar balik menuju {destination}"
+                "destination": "Putar balik menuju {destination}",
+                "junction_name": "Make a U-turn at {junction_name}"
             }
         },
         "depart": {
@@ -8964,17 +9112,20 @@ module.exports={
             "default": {
                 "default": "Belok {modifier}",
                 "name": "Belok {modifier} ke {way_name}",
-                "destination": "Belok {modifier} menuju {destination}"
+                "destination": "Belok {modifier} menuju {destination}",
+                "junction_name": "Turn {modifier} at {junction_name}"
             },
             "straight": {
                 "default": "Lurus terus",
                 "name": "Tetap lurus ke {way_name} ",
-                "destination": "Tetap lurus menuju {destination}"
+                "destination": "Tetap lurus menuju {destination}",
+                "junction_name": "Continue straight at {junction_name}"
             },
             "uturn": {
                 "default": "Putar balik di akhir jalan",
                 "name": "Putar balik di {way_name} di akhir jalan",
-                "destination": "Putar balik menuju {destination} di akhir jalan"
+                "destination": "Putar balik menuju {destination} di akhir jalan",
+                "junction_name": "Make a U-turn at {junction_name}"
             }
         },
         "fork": {
@@ -9141,7 +9292,7 @@ module.exports={
             "slight right": {
                 "default": "Ambil jalan melandai di sebelah kanan",
                 "name": "Ambil jalan melandai di sebelah kanan ke {way_name}",
-                "destination": "Ambil jalan melandai di sebelah kanan  menuju {destination}",
+                "destination": "Ambil jalan melandai di sebelah kanan menuju {destination}",
                 "exit": "Take exit {exit} on the right",
                 "exit_destination": "Take exit {exit} on the right towards {destination}"
             }
@@ -9160,7 +9311,7 @@ module.exports={
             "right": {
                 "default": "Ambil jalan melandai di sebelah kanan",
                 "name": "Ambil jalan melandai di sebelah kanan ke {way_name}",
-                "destination": "Ambil jalan melandai di sebelah kanan  menuju {destination}"
+                "destination": "Ambil jalan melandai di sebelah kanan menuju {destination}"
             },
             "sharp left": {
                 "default": "Ambil jalan yang melandai di sebelah kiri",
@@ -9170,7 +9321,7 @@ module.exports={
             "sharp right": {
                 "default": "Ambil jalan melandai di sebelah kanan",
                 "name": "Ambil jalan melandai di sebelah kanan ke {way_name}",
-                "destination": "Ambil jalan melandai di sebelah kanan  menuju {destination}"
+                "destination": "Ambil jalan melandai di sebelah kanan menuju {destination}"
             },
             "slight left": {
                 "default": "Ambil jalan yang melandai di sebelah kiri",
@@ -9180,7 +9331,7 @@ module.exports={
             "slight right": {
                 "default": "Ambil jalan melandai di sebelah kanan",
                 "name": "Ambil jalan melandai di sebelah kanan ke {way_name}",
-                "destination": "Ambil jalan melandai di sebelah kanan  menuju {destination}"
+                "destination": "Ambil jalan melandai di sebelah kanan menuju {destination}"
             }
         },
         "rotary": {
@@ -9291,22 +9442,26 @@ module.exports={
             "default": {
                 "default": "Lakukan {modifier}",
                 "name": "Lakukan {modifier} ke arah {way_name}",
-                "destination": "Lakukan {modifier} menuju {destination}"
+                "destination": "Lakukan {modifier} menuju {destination}",
+                "junction_name": "Make a {modifier} at {junction_name}"
             },
             "left": {
                 "default": "Belok kiri",
                 "name": "Belok kiri ke {way_name}",
-                "destination": "Belok kiri menuju {destination}"
+                "destination": "Belok kiri menuju {destination}",
+                "junction_name": "Turn left at {junction_name}"
             },
             "right": {
                 "default": "Belok kanan",
                 "name": "Belok kanan ke {way_name}",
-                "destination": "Belok kanan menuju {destination}"
+                "destination": "Belok kanan menuju {destination}",
+                "junction_name": "Turn right at {junction_name}"
             },
             "straight": {
                 "default": "Lurus",
                 "name": "Lurus arah {way_name}",
-                "destination": "Lurus menuju {destination}"
+                "destination": "Lurus menuju {destination}",
+                "junction_name": "Go straight at {junction_name}"
             }
         },
         "use lane": {
@@ -9455,27 +9610,32 @@ module.exports={
             "sharp left": {
                 "default": "Svolta a sinistra",
                 "name": "Fai una curva stretta a sinistra per stare su {way_name}",
-                "destination": "Svolta a sinistra verso {destination}"
+                "destination": "Svolta a sinistra verso {destination}",
+                "junction_name": "Fai una curva stretta a sinistra al {junction_name}"
             },
             "sharp right": {
                 "default": "Svolta a destra",
                 "name": "Fai una curva stretta a destra per stare su {way_name}",
-                "destination": "Svolta a destra verso {destination}"
+                "destination": "Svolta a destra verso {destination}",
+                "junction_name": "Fai una curva stretta a destra al {junction_name}"
             },
             "slight left": {
                 "default": "Fai una leggera curva a sinistra",
                 "name": "Fai una leggera curva a sinistra per stare su {way_name}",
-                "destination": "Fai una leggera curva a sinistra verso {destination}"
+                "destination": "Fai una leggera curva a sinistra verso {destination}",
+                "junction_name": "Fai una leggera curva a sinistra al {junction_name}"
             },
             "slight right": {
                 "default": "Fai una leggera curva a destra",
                 "name": "Fai una leggera curva a destra per stare su {way_name}",
-                "destination": "Fai una leggera curva a destra verso {destination}"
+                "destination": "Fai una leggera curva a destra verso {destination}",
+                "junction_name": "Fai una leggera curva a destra al {junction_name}"
             },
             "uturn": {
                 "default": "Fai un’inversione a U",
                 "name": "Fai un’inversione ad U poi continua su {way_name}",
-                "destination": "Fai un’inversione a U verso {destination}"
+                "destination": "Fai un’inversione a U verso {destination}",
+                "junction_name": "Fai un’inversione ad U al {junction_name}"
             }
         },
         "depart": {
@@ -9489,17 +9649,20 @@ module.exports={
             "default": {
                 "default": "Gira a {modifier}",
                 "name": "Gira a {modifier} in {way_name}",
-                "destination": "Gira a {modifier} verso {destination}"
+                "destination": "Gira a {modifier} verso {destination}",
+                "junction_name": "Gira a {modifier} al {junction_name}"
             },
             "straight": {
                 "default": "Continua dritto",
                 "name": "Continua dritto in {way_name}",
-                "destination": "Continua dritto verso {destination}"
+                "destination": "Continua dritto verso {destination}",
+                "junction_name": "Continua dritto al {junction_name}"
             },
             "uturn": {
                 "default": "Fai un’inversione a U alla fine della strada",
                 "name": "Fai un’inversione a U in {way_name} alla fine della strada",
-                "destination": "Fai un’inversione a U verso {destination} alla fine della strada"
+                "destination": "Fai un’inversione a U verso {destination} alla fine della strada",
+                "junction_name": "Fai un’inversione a U al {junction_name}"
             }
         },
         "fork": {
@@ -9626,14 +9789,14 @@ module.exports={
                 "name": "Prendi la rampa in {way_name}",
                 "destination": "Prendi la rampa verso {destination}",
                 "exit": "Prendi l’uscita {exit}",
-                "exit_destination": "Prendi l’uscita  {exit} verso {destination}"
+                "exit_destination": "Prendi l’uscita {exit} verso {destination}"
             },
             "left": {
                 "default": "Prendi la rampa a sinistra",
                 "name": "Prendi la rampa a sinistra in {way_name}",
                 "destination": "Prendi la rampa a sinistra verso {destination}",
                 "exit": "Prendi l’uscita {exit} a sinistra",
-                "exit_destination": "Prendi la {exit}  uscita a sinistra verso {destination}"
+                "exit_destination": "Prendi la {exit} uscita a sinistra verso {destination}"
             },
             "right": {
                 "default": "Prendi la rampa a destra",
@@ -9647,7 +9810,7 @@ module.exports={
                 "name": "Prendi la rampa a sinistra in {way_name}",
                 "destination": "Prendi la rampa a sinistra verso {destination}",
                 "exit": "Prendi l’uscita {exit} a sinistra",
-                "exit_destination": "Prendi la {exit}  uscita a sinistra verso {destination}"
+                "exit_destination": "Prendi la {exit} uscita a sinistra verso {destination}"
             },
             "sharp right": {
                 "default": "Prendi la rampa a destra",
@@ -9661,7 +9824,7 @@ module.exports={
                 "name": "Prendi la rampa a sinistra in {way_name}",
                 "destination": "Prendi la rampa a sinistra verso {destination}",
                 "exit": "Prendi l’uscita {exit} a sinistra",
-                "exit_destination": "Prendi la {exit}  uscita a sinistra verso {destination}"
+                "exit_destination": "Prendi la {exit} uscita a sinistra verso {destination}"
             },
             "slight right": {
                 "default": "Prendi la rampa a destra",
@@ -9728,7 +9891,7 @@ module.exports={
                 "name_exit": {
                     "default": "Immèttitì in {rotary_name} e prendi la {exit_number} uscita",
                     "name": "Immèttitì in {rotary_name} e prendi la {exit_number} uscita in {way_name}",
-                    "destination": "Immèttitì in {rotary_name} e prendi la {exit_number}  uscita verso {destination}"
+                    "destination": "Immèttitì in {rotary_name} e prendi la {exit_number} uscita verso {destination}"
                 }
             }
         },
@@ -9816,22 +9979,26 @@ module.exports={
             "default": {
                 "default": "Gira a {modifier}",
                 "name": "Gira a {modifier} in {way_name}",
-                "destination": "Gira a {modifier} verso {destination}"
+                "destination": "Gira a {modifier} verso {destination}",
+                "junction_name": "Gira a {modifier} al {junction_name}"
             },
             "left": {
                 "default": "Svolta a sinistra",
                 "name": "Svolta a sinistra in {way_name}",
-                "destination": "Svolta a sinistra verso {destination}"
+                "destination": "Svolta a sinistra verso {destination}",
+                "junction_name": "Svolta a sinistra al {junction_name}"
             },
             "right": {
                 "default": "Gira a destra",
                 "name": "Svolta a destra in {way_name}",
-                "destination": "Svolta a destra verso {destination}"
+                "destination": "Svolta a destra verso {destination}",
+                "junction_name": "Svolta a destra al {junction_name}"
             },
             "straight": {
                 "default": "Prosegui dritto",
                 "name": "Continua su {way_name}",
-                "destination": "Continua verso {destination}"
+                "destination": "Continua verso {destination}",
+                "junction_name": "Prosegui dritto al {junction_name}"
             }
         },
         "use lane": {
@@ -9877,8 +10044,8 @@ module.exports={
             "modifier": {
                 "left": "左",
                 "right": "右",
-                "sharp left": "大きく左",
-                "sharp right": "大きく右",
+                "sharp left": "左戻る",
+                "sharp right": "右戻る",
                 "slight left": "斜め左",
                 "slight right": "斜め右",
                 "straight": "直進",
@@ -9907,57 +10074,57 @@ module.exports={
         },
         "arrive": {
             "default": {
-                "default": "{nth}目の目的地に到着しました",
-                "upcoming": "まもなく{nth}目の目的地に到着します",
+                "default": "{nth}目的地に到着しました",
+                "upcoming": "まもなく{nth}目的地に到着します",
                 "short": "目的地に到着しました",
                 "short-upcoming": "まもなく目的地に到着します",
                 "named": "{waypoint_name}に到着しました"
             },
             "left": {
-                "default": "{nth}目の目的地に到着しました。目的地は左側です",
-                "upcoming": "まもなく{nth}目の目的地に到着します。目的地は左側です",
+                "default": "{nth}目的地に到着しました。目的地は左側です",
+                "upcoming": "まもなく{nth}目的地に到着します。目的地は左側です",
                 "short": "目的地に到着しました",
                 "short-upcoming": "まもなく目的地に到着します",
                 "named": "{waypoint_name}に到着しました。目的地は左側です"
             },
             "right": {
-                "default": "{nth}目の目的地に到着しました。目的地は右側です",
-                "upcoming": "まもなく{nth}目の目的地に到着します。目的地は右側です",
+                "default": "{nth}目的地に到着しました。目的地は右側です",
+                "upcoming": "まもなく{nth}目的地に到着します。目的地は右側です",
                 "short": "目的地に到着しました",
                 "short-upcoming": "まもなく目的地に到着します",
                 "named": "{waypoint_name}に到着しました。目的地は右側です"
             },
             "sharp left": {
-                "default": "{nth}目の目的地に到着しました。目的地は左側です",
-                "upcoming": "{nth}目の目的地に到着しました。目的地は左側です",
+                "default": "{nth}目的地に到着しました。目的地は左側です",
+                "upcoming": "{nth}目的地に到着しました。目的地は左側です",
                 "short": "目的地に到着しました",
                 "short-upcoming": "まもなく目的地に到着します",
                 "named": "{waypoint_name}に到着しました。目的地は左側です"
             },
             "sharp right": {
-                "default": "{nth}目の目的地に到着しました。目的地は右側です",
-                "upcoming": "まもなく{nth}目の目的地に到着します。目的地は右側です",
+                "default": "{nth}目的地に到着しました。目的地は右側です",
+                "upcoming": "まもなく{nth}目的地に到着します。目的地は右側です",
                 "short": "目的地に到着しました",
                 "short-upcoming": "まもなく目的地に到着します",
                 "named": "{waypoint_name}に到着しました。目的地は右側です"
             },
             "slight right": {
-                "default": "{nth}目の目的地に到着しました。目的地は右側です",
-                "upcoming": "まもなく{nth}目の目的地に到着します。目的地は右側です",
+                "default": "{nth}目的地に到着しました。目的地は右側です",
+                "upcoming": "まもなく{nth}目的地に到着します。目的地は右側です",
                 "short": "目的地に到着しました",
                 "short-upcoming": "まもなく目的地に到着します",
                 "named": "{waypoint_name}に到着しました。目的地は右側です"
             },
             "slight left": {
-                "default": "{nth}目の目的地に到着しました。目的地は左側です",
-                "upcoming": "{nth}目の目的地に到着しました。目的地は左側です",
+                "default": "{nth}目的地に到着しました。目的地は左側です",
+                "upcoming": "{nth}目的地に到着しました。目的地は左側です",
                 "short": "目的地に到着しました",
                 "short-upcoming": "まもなく目的地に到着します",
                 "named": "{waypoint_name}に到着しました。目的地は左側です"
             },
             "straight": {
-                "default": "{nth}目の目的地に到着しました。目的地は前方です",
-                "upcoming": "まもなく{nth}目の目的地に到着します。目的地は前方です",
+                "default": "{nth}目的地に到着しました。目的地は前方です",
+                "upcoming": "まもなく{nth}目的地に到着します。目的地は前方です",
                 "short": "目的地に到着しました",
                 "short-upcoming": "まもなく目的地に到着します",
                 "named": "{waypoint_name}に到着しました。目的地は前方です"
@@ -9965,376 +10132,388 @@ module.exports={
         },
         "continue": {
             "default": {
-                "default": "{modifier}に曲がる",
-                "name": "{modifier}に曲がり、{way_name}を進む",
-                "destination": "{modifier}に曲がり、{destination}へ向かう",
-                "exit": "{modifier}に曲がり、{way_name}を進む"
+                "default": "{modifier}方向 です",
+                "name": "{modifier}方向 です。その先{way_name}です",
+                "destination": "直進です。その先、{destination}方面です",
+                "exit": "{modifier}方向 です。その先{way_name}です"
             },
             "straight": {
-                "default": "直進する",
-                "name": "{way_name}を直進する",
-                "destination": "{destination}に向けて直進する",
-                "distance": "{distance}直進する",
-                "namedistance": "{way_name}を{distance}直進する"
+                "default": "直進です",
+                "name": "{way_name}を直進です",
+                "destination": "{destination}に向けて直進です",
+                "distance": "{distance}直進です",
+                "namedistance": "{way_name}を{distance}直進です"
             },
             "sharp left": {
                 "default": "大きく左に曲がる",
-                "name": "大きく左に曲がり、{way_name}を進む",
-                "destination": "大きく左に曲がり、{destination}へ向かう"
+                "name": "大きく左に曲がり、{way_name}を進みます",
+                "destination": "大きく左に曲がり、{destination}へ向かいます",
+                "junction_name": "{junction_name}を左方向です"
             },
             "sharp right": {
-                "default": "大きく右に曲がる",
-                "name": "大きく右に曲がり、{way_name}を進む",
-                "destination": "大きく右に曲がり、{destination}へ向かう"
+                "default": "大きく右に曲がります",
+                "name": "大きく右に曲がり、{way_name}を進みます",
+                "destination": "大きく右に曲がり、{destination}へ向かいます",
+                "junction_name": "{junction_name}を右方向です"
             },
             "slight left": {
-                "default": "斜め左に曲がる",
-                "name": "斜め左に曲がり、{way_name}を進む",
-                "destination": "斜め左に曲がり、{destination}へ向かう"
+                "default": "斜め左方向です",
+                "name": "斜め左方向です。その先、{way_name}です",
+                "destination": "斜め左方向です。その先、{way_name}です",
+                "junction_name": "{junction_name}を斜め左方向です"
             },
             "slight right": {
-                "default": "斜め右に曲がる",
-                "name": "斜め右に曲がり、{way_name}を進む",
-                "destination": "斜め右に曲がり、{destination}へ向かう"
+                "default": "斜め右方向です",
+                "name": "斜め右方向です。その先、{way_name}です",
+                "destination": "斜め右方向です。その先、{destination}方面です",
+                "junction_name": "{junction_name}を斜め右方向です"
             },
             "uturn": {
-                "default": "Uターンする",
-                "name": "Uターンし、{way_name}を進む",
-                "destination": "Uターンし、{destination}へ向かう"
+                "default": "Uターンです",
+                "name": "Uターンです。その先、{way_name}です",
+                "destination": "Uターンです。その先、{destination}方面です",
+                "junction_name": "{junction_name}をUターンです"
             }
         },
         "depart": {
             "default": {
-                "default": "{direction}に進む",
-                "name": "{way_name}を{direction}に進む",
-                "namedistance": "{way_name}を{direction}に{distance}進む"
+                "default": "{direction}方向です",
+                "name": "{way_name}を{direction}方向です",
+                "namedistance": "{way_name}を{direction}方向に{distance}です"
             }
         },
         "end of road": {
             "default": {
-                "default": "{modifier}に曲がる",
-                "name": "{modifier}に曲がり、{way_name}を進む",
-                "destination": "{modifier}に曲がり、{destination}へ向かう"
+                "default": "{modifier}方向です",
+                "name": "{modifier}方向です。その先、{way_name}です",
+                "destination": "{modifier}方向です。その先、{destination}方面です",
+                "junction_name": "{junction_name}を{modifier}方向です"
             },
             "straight": {
-                "default": "直進する",
-                "name": "{way_name}を直進する",
-                "destination": "直進し、{destination}へ向かう"
+                "default": "直進です",
+                "name": "{way_name}を直進です",
+                "destination": "直進です。その先、{destination}方面です",
+                "junction_name": "{junction_name}を直進です"
             },
             "uturn": {
-                "default": "突き当りでUターンする",
-                "name": "{way_name}の突き当りでUターンする",
-                "destination": "突き当たりでUターンし、{destination}へ向かう"
+                "default": "突き当りをUターンです",
+                "name": "{way_name}の突き当りをUターンです",
+                "destination": "突き当たりをUターンです。その先、{destination}方面です",
+                "junction_name": "{junction_name}の突き当りでUターンです"
             }
         },
         "fork": {
             "default": {
-                "default": "分岐を{modifier}に進む",
-                "name": "{way_name}の{modifier}車線を進む",
-                "destination": "{modifier}車線を進み、{destination}へ向かう"
+                "default": "分岐を{modifier}方向です",
+                "name": "{way_name}の{modifier}車線を走行します",
+                "destination": "{modifier}車線です。その先、{destination}方面です"
             },
             "slight left": {
-                "default": "分岐を左方向に進む",
-                "name": "{way_name}の左車線を進む",
-                "destination": "{destination}へ向けて左車線を進む"
+                "default": "分岐を左方向です",
+                "name": "{way_name}の左車線を走行します",
+                "destination": "左車線です。その先、{destination}方面です"
             },
             "slight right": {
-                "default": "分岐を右方向に進む",
-                "name": "{way_name}の右車線を進む",
-                "destination": "{destination}へ向けて右車線を進む"
+                "default": "分岐を右方向です",
+                "name": "{way_name}の右車線を走行します",
+                "destination": "右車線です。その先、{destination}方面です"
             },
             "sharp left": {
-                "default": "分岐を大きく左方向に進む",
-                "name": "大きく左方向に曲がり、{way_name}を進む",
-                "destination": "大きく左方向に曲がり、{destination}へ向かう"
+                "default": "分岐を左方向です",
+                "name": "左方向です。その先、{way_name}です",
+                "destination": "左方向です。その先、{destination}方面です"
             },
             "sharp right": {
-                "default": "分岐を大きく右方向に進む",
-                "name": "大きく右方向に曲がり、{way_name}を進む",
-                "destination": "大きく右方向に曲がり、{destination}へ向かう"
+                "default": "分岐を右方向です",
+                "name": "右方向です。その先、{way_name}です",
+                "destination": "右方向です。その先、{destination}方面です"
             },
             "uturn": {
-                "default": "Uターンする",
-                "name": "Uターンし、{way_name}を進む",
-                "destination": "Uターンし、{destination}へ向かう"
+                "default": "Uターンです",
+                "name": "Uターンです。その先、{way_name}です",
+                "destination": "Uターンです。その先、{destination}方面です"
             }
         },
         "merge": {
             "default": {
-                "default": "{modifier}に合流する",
-                "name": "{modifier}に合流し、{way_name}を進む",
-                "destination": "{modifier}に合流し、{destination}へ向かう"
+                "default": "{modifier}方向に合流です",
+                "name": "{modifier}方向に合流です。その先、{way_name}です",
+                "destination": "{modifier}方向に合流です。その先、{destination}方面です"
             },
             "straight": {
-                "default": "合流する",
-                "name": "合流し、{way_name}を進む",
-                "destination": "合流し、{destination}へ向かう"
+                "default": "合流です",
+                "name": "合流です。その先、{way_name}です",
+                "destination": "合流です。その先、{destination}方面です"
             },
             "slight left": {
-                "default": "左に合流する",
-                "name": "左に合流し、{way_name}を進む",
-                "destination": "左に合流し、{destination}へ向かう"
+                "default": "左方向に合流です",
+                "name": "左方向に合流です。その先、{way_name}です",
+                "destination": "左方向に合流です。その先、{destination}方面です"
             },
             "slight right": {
-                "default": "右に合流する",
-                "name": "右に合流し、{way_name}を進む",
-                "destination": "右に合流し、{destination}へ向かう"
+                "default": "右方向に合流です",
+                "name": "右方向に合流です。その先、{way_name}です",
+                "destination": "右方向に合流です。その先、{destination}方面です"
             },
             "sharp left": {
-                "default": "左に合流する",
-                "name": "左に合流し、{way_name}を進む",
-                "destination": "左に合流し、{destination}へ向かう"
+                "default": "左方向に合流です",
+                "name": "左方向に合流です。その先、{way_name}です",
+                "destination": "左方向に合流です。その先、{destination}方面です"
             },
             "sharp right": {
-                "default": "右に合流する",
-                "name": "右に合流し、{way_name}を進む",
-                "destination": "右に合流し、{destination}へ向かう"
+                "default": "右方向に合流です",
+                "name": "右方向に合流です。その先、{way_name}です",
+                "destination": "右方向に合流です。その先、{destination}方面です"
             },
             "uturn": {
-                "default": "Uターンする",
-                "name": "Uターンし、{way_name}を進む",
-                "destination": "Uターンし、{destination}へ向かう"
+                "default": "Uターンです",
+                "name": "Uターンです。その先、{way_name}です",
+                "destination": "Uターンです。その先、{destination}方面です"
             }
         },
         "new name": {
             "default": {
-                "default": "{modifier}に進む",
-                "name": "{way_name}を{modifier}に進む",
-                "destination": "{destination}に向けて{modifier}に進む"
+                "default": "{modifier}方向です",
+                "name": "{way_name}を{modifier}方向です",
+                "destination": "{modifier}方向です。その先、{destination}方面です"
             },
             "straight": {
-                "default": "直進する",
-                "name": "{way_name}を直進する",
-                "destination": "{destination}へ向けて直進する"
+                "default": "直進です",
+                "name": "{way_name}を直進です",
+                "destination": "直進です。その先、{destination}方面です"
             },
             "sharp left": {
-                "default": "大きく左に曲がる",
-                "name": "大きく左方向に曲がり、{way_name}を進む",
-                "destination": "大きく左方向に曲がり、{destination}へ向かう"
+                "default": "左方向です",
+                "name": "左方向です。その先、{way_name}です",
+                "destination": "左方向です。その先、{destination}方面です"
             },
             "sharp right": {
-                "default": "大きく右に曲がる",
-                "name": "大きく右方向に曲がり、{way_name}を進む",
-                "destination": "大きく右方向に曲がり、{destination}へ向かう"
+                "default": "右方向です",
+                "name": "右方向です。その先、{way_name}です",
+                "destination": "右方向です。その先、{destination}方面です"
             },
             "slight left": {
-                "default": "斜め左方向に進む",
-                "name": "{way_name}を斜め左方向に進む",
-                "destination": "{destination}に向けて斜め左方向に進む"
+                "default": "斜め左方向です",
+                "name": "{way_name}を斜め左方向です",
+                "destination": "斜め左方向です。その先、{destination}方面です"
             },
             "slight right": {
-                "default": "斜め右方向に進む",
-                "name": "{way_name}を斜め右方向に進む",
-                "destination": "{destination}に向けて斜め右方向に進む"
+                "default": "斜め右方向です",
+                "name": "{way_name}を斜め右方向です",
+                "destination": "斜め右方向です。その先、{destination}方面です"
             },
             "uturn": {
-                "default": "Uターンする",
-                "name": "Uターンし、{way_name}を進む",
-                "destination": "Uターンし、{destination}へ向かう"
+                "default": "Uターンです",
+                "name": "Uターンです。その先、{way_name}です",
+                "destination": "Uターンです。その先、{destination}方面です"
             }
         },
         "notification": {
             "default": {
-                "default": "{modifier}に進む",
-                "name": "{way_name}を{modifier}に進む",
-                "destination": "{destination}へ向けて{modifier}に進む"
+                "default": "{modifier}方向です",
+                "name": "{way_name}を{modifier}方向です",
+                "destination": "{modifier}方向です。その先、{destination}方面です"
             },
             "uturn": {
-                "default": "Uターンする",
-                "name": "Uターンし、{way_name}を進む",
-                "destination": "Uターンし、{destination}へ向かう"
+                "default": "Uターンです",
+                "name": "Uターンです。その先、{way_name}です",
+                "destination": "Uターンです。その先、{destination}方面です"
             }
         },
         "off ramp": {
             "default": {
-                "default": "ランプに向かう",
-                "name": "{way_name}に向けてランプに向かう",
-                "destination": "{destination}に向けてランプに向かう",
-                "exit": "{exit}出口に向かう",
-                "exit_destination": "{exit}出口を出て{destination}へ向かう"
+                "default": "出口です",
+                "name": "{way_name}方面です",
+                "destination": "{destination}方面です",
+                "exit": "{exit} 出口です",
+                "exit_destination": "{destination} 方面、{exit}　出口です"
             },
             "left": {
-                "default": "左方向のランプに向かう",
-                "name": "左方向のランプに向かい、{way_name}を進む",
-                "destination": "左方向のランプに向かい、その後{destination}へ向かう",
-                "exit": "左方向の{exit}出口を出る",
-                "exit_destination": "左方向の{exit}出口を出て{destination}へ向かう"
+                "default": "左方向です",
+                "name": "左方向、{way_name}方面です",
+                "destination": "左方向、{destination}方面です",
+                "exit": "左方向、{exit} 出口です",
+                "exit_destination": "左方向、{destination} 方面、{exit}　出口です"
             },
             "right": {
-                "default": "右方向のランプに向かう",
-                "name": "右方向のランプに向かい、{way_name}を進む",
-                "destination": "右方向のランプに向かい、その後{destination}へ向かう",
-                "exit": "右方向の{exit}出口を出る",
-                "exit_destination": "右方向の{exit}出口を出て{destination}へ向かう"
+                "default": "右方向です",
+                "name": "右方向、{way_name}方面です",
+                "destination": "右方向、{destination}方面です",
+                "exit": "右方向、{exit} 出口です",
+                "exit_destination": "右方向、{destination} 方面、{exit}　出口です"
             },
             "sharp left": {
-                "default": "左方向のランプに向かう",
-                "name": "左方向のランプに向かい、{way_name}を進む",
-                "destination": "左方向のランプに向かい、{destination}へ向かう",
-                "exit": "左方向の{exit}出口を出る",
-                "exit_destination": "左方向の{exit}出口を出て{destination}へ向かう"
+                "default": "左方向です",
+                "name": "左方向、{way_name}方面です",
+                "destination": "左方向、{destination}方面です",
+                "exit": "左方向、{exit} 出口です",
+                "exit_destination": "左方向、{destination} 方面、{exit}　出口です"
             },
             "sharp right": {
-                "default": "右方向のランプに向かう",
-                "name": "右方向のランプに向かい、{way_name}を進む",
-                "destination": "右方向のランプに向かい、{destination}へ向かう",
-                "exit": "右方向の{exit}出口を出る",
-                "exit_destination": "右方向の{exit}出口を出て{destination}へ向かう"
+                "default": "右方向です",
+                "name": "右方向、{way_name}方面です",
+                "destination": "右方向、{destination}方面です",
+                "exit": "右方向、{exit} 出口です",
+                "exit_destination": "右方向、{destination} 方面、{exit}　出口です"
             },
             "slight left": {
-                "default": "左方向のランプへ向かう",
-                "name": "左方向のランプに向かい、{way_name}を進む",
-                "destination": "左方向のランプに向かい、その後{destination}へ向かう",
-                "exit": "左方向の{exit}出口を出る",
-                "exit_destination": "左方向の{exit}出口を出て{destination}へ向かう"
+                "default": "左方向です",
+                "name": "左方向、{way_name}方面です",
+                "destination": "左方向、{destination}方面です",
+                "exit": "左方向、{exit} 出口です",
+                "exit_destination": "左方向、{destination} 方面、{exit}　出口です"
             },
             "slight right": {
-                "default": "右方向のランプへ向かう",
-                "name": "右方向のランプに向かい、{way_name}を進む",
-                "destination": "右方向のランプに向かい、その後{destination}へ向かう",
-                "exit": "右方向の{exit}出口を出る",
-                "exit_destination": "右方向の{exit}出口を出て{destination}へ向かう"
+                "default": "右方向です",
+                "name": "右方向、{way_name}方面です",
+                "destination": "右方向、{destination}方面です",
+                "exit": "右方向、{exit} 出口です",
+                "exit_destination": "右方向、{destination} 方面、{exit}　出口です"
             }
         },
         "on ramp": {
             "default": {
-                "default": "ランプへ向かう",
-                "name": "ランプへ向かい、{way_name}を進む",
-                "destination": "ランプに向かい、その後{destination}へ向かう"
+                "default": "入口です",
+                "name": "{way_name}方面、入口です",
+                "destination": "{destination}方面、入口です"
             },
             "left": {
-                "default": "左方向のランプへ向かう",
-                "name": "左方向のランプに向かい、{way_name}を進む",
-                "destination": "左方向のランプに向かい、その後{destination}へ向かう"
+                "default": "左方向、入口です",
+                "name": "左方向、{way_name}方面、入口です",
+                "destination": "左方向、{destination}方面、入口です"
             },
             "right": {
-                "default": "右方向のランプへ向かう",
-                "name": "右方向のランプに向かい、{way_name}を進む",
-                "destination": "右方向のランプに向かい、その後{destination}へ向かう"
+                "default": "右方向、入口です",
+                "name": "右方向、{way_name}方面、入口です",
+                "destination": "右方向、{destination}方面、入口です"
             },
             "sharp left": {
-                "default": "左方向のランプへ向かう",
-                "name": "左方向のランプに向かい、{way_name}を進む",
-                "destination": "左方向のランプに向かい、その後{destination}へ向かう"
+                "default": "左方向、入口です",
+                "name": "左方向、{way_name}方面、入口です",
+                "destination": "左方向、{destination}方面、入口です"
             },
             "sharp right": {
-                "default": "右方向のランプへ向かう",
-                "name": "右方向のランプに向かい、{way_name}を進む",
-                "destination": "右方向のランプに向かい、その後{destination}へ向かう"
+                "default": "右方向、入口です",
+                "name": "右方向、{way_name}方面、入口です",
+                "destination": "右方向、{destination}方面、入口です"
             },
             "slight left": {
-                "default": "左方向のランプへ向かう",
-                "name": "左方向のランプに向かい、{way_name}を進む",
-                "destination": "左方向のランプに向かい、その後{destination}へ向かう"
+                "default": "左方向、入口です",
+                "name": "左方向、{way_name}方面、入口です",
+                "destination": "左方向、{destination}方面、入口です"
             },
             "slight right": {
-                "default": "右方向のランプへ向かう",
-                "name": "右方向のランプに向かい、{way_name}を進む",
-                "destination": "右方向のランプに向かい、その後{destination}へ向かう"
+                "default": "右方向、入口です",
+                "name": "右方向、{way_name}方面、入口です",
+                "destination": "右方向、{destination}方面、入口です"
             }
         },
         "rotary": {
             "default": {
                 "default": {
-                    "default": "ランアバウトへ進む",
-                    "name": "ランアバウトから{way_name}へ進む",
-                    "destination": "ランアバウトをから{destination}へ向かう"
+                    "default": "環状交差点です",
+                    "name": "環状交差点です。その先、{way_name}です",
+                    "destination": "環状交差点です。その先、{destination}方面です"
                 },
                 "name": {
-                    "default": "{rotary_name}に入る",
-                    "name": "{rotary_name}から{way_name}を進む",
-                    "destination": "{rotary_name}から{destination}へ向かう"
+                    "default": "{rotary_name}です",
+                    "name": "{rotary_name}です。その先、{way_name}です",
+                    "destination": "{rotary_name}です。その先、{destination}方面です"
                 },
                 "exit": {
-                    "default": "ランアバウト{exit_number}番出口を出る",
-                    "name": "ランアバウト{exit_number}番出口を出て{way_name}を進む",
-                    "destination": "ランアバウト{exit_number}番出口を出て{destination}へ向かう"
+                    "default": "環状交差点です。その先、{exit_number}番出口です",
+                    "name": "環状交差点です。その先、{exit_number}番出口、{way_name}です",
+                    "destination": "環状交差点です。その先、{exit_number}番出口、{destination}方面です"
                 },
                 "name_exit": {
-                    "default": "{rotary_name}に入り、{exit_number}番出口を出る",
-                    "name": "{rotary_name}の{exit_number}番出口から{way_name}を進む",
-                    "destination": "{rotary_name}の{exit_number}番出口から{destination}へ向かう"
+                    "default": "{rotary_name}です。その先、{exit_number}番出口です",
+                    "name": "{rotary_name}です。その先、{exit_number}番出口、{way_name}です",
+                    "destination": "{rotary_name}です。その先、{exit_number}番出口、{destination}方面です"
                 }
             }
         },
         "roundabout": {
             "default": {
                 "exit": {
-                    "default": "ランアバウト{exit_number}番出口を出る",
-                    "name": "ランアバウト{exit_number}番出口を出て{way_name}を進む",
-                    "destination": "ランアバウト{exit_number}番出口を出て{destination}へ向かう"
+                    "default": "環状交差点です。その先、{exit_number}番出口です",
+                    "name": "環状交差点です。その先、{exit_number}番出口、{way_name}です",
+                    "destination": "環状交差点です。その先、{exit_number}番出口、{destination}方面です"
                 },
                 "default": {
-                    "default": "ランアバウトへ進む",
-                    "name": "ランアバウトを出て{way_name}を進む",
-                    "destination": "ランアバウトを出て{destination}へ向かう"
+                    "default": "環状交差点です",
+                    "name": "環状交差点です。その先、{way_name}です",
+                    "destination": "環状交差点です。その先、{destination}方面です"
                 }
             }
         },
         "roundabout turn": {
             "default": {
-                "default": "{modifier}に向かう",
-                "name": "{modifier}に向かい、{way_name}を進む",
-                "destination": "{modifier}に向かい、その後{destination}へ向かう"
+                "default": "{modifier}方向です",
+                "name": "{modifier}方向です。その先、{way_name}です",
+                "destination": "{modifier}方向です。その先、{destination}方面です"
             },
             "left": {
-                "default": "左折する",
-                "name": "左折して{way_name}を進む",
-                "destination": "左折して{destination}へ向かう"
+                "default": "左折です",
+                "name": "左折です。その先、{way_name}です",
+                "destination": "左折です。その先、{destination}方面です"
             },
             "right": {
-                "default": "右折する",
-                "name": "右折して{way_name}を進む",
-                "destination": "右折して{destination}へ向かう"
+                "default": "右折です",
+                "name": "右折です。その先、{way_name}です",
+                "destination": "右折です。その先、{destination}方面です"
             },
             "straight": {
-                "default": "直進する",
-                "name": "{way_name}を直進する",
-                "destination": "{destination}へ直進する"
+                "default": "直進です",
+                "name": "{way_name}を直進です",
+                "destination": "直進です。その先、{destination}方面です"
             }
         },
         "exit roundabout": {
             "default": {
-                "default": "ランアバウトを出る",
-                "name": "ランアバウトを出て{way_name}を進む",
-                "destination": "ランアバウトを出て{destination}へ向かう"
+                "default": "環状交差点を出ます",
+                "name": "環状交差点を出ます。その先、{way_name}です",
+                "destination": "環状交差点を出ます。その先、{destination}方面です"
             }
         },
         "exit rotary": {
             "default": {
-                "default": "ランアバウトを出る",
-                "name": "ランアバウトを出て{way_name}を進む",
-                "destination": "ランアバウトを出て{destination}へ向かう"
+                "default": "環状交差点を出ます",
+                "name": "環状交差点を出ます。その先、{way_name}です",
+                "destination": "環状交差点を出ます。その先、{destination}方面です"
             }
         },
         "turn": {
             "default": {
-                "default": "{modifier}に向かう",
-                "name": "{modifier}に向かい、{way_name}を進む",
-                "destination": "{modifier}に向かい、その後{destination}へ向かう"
+                "default": "{modifier}方向です",
+                "name": "{modifier}方向です。その先、{way_name}です",
+                "destination": "{modifier}方向です、その先、{destination}方面です",
+                "junction_name": "{junction_name}を{modifier}方向です"
             },
             "left": {
-                "default": "左折する",
-                "name": "左折して{way_name}を進む",
-                "destination": "左折して{destination}へ向かう"
+                "default": "左折です",
+                "name": "左折です。その先、{way_name}です",
+                "destination": "左折です。その先、{destination}方面です",
+                "junction_name": "{junction_name}を左折です"
             },
             "right": {
-                "default": "右折する",
-                "name": "右折して{way_name}を進む",
-                "destination": "右折して{destination}へ向かう"
+                "default": "右折です",
+                "name": "右折です。その先、{way_name}です",
+                "destination": "右折です。その先、{destination}方面です",
+                "junction_name": "{junction_name}を右折です"
             },
             "straight": {
-                "default": "直進する",
-                "name": "{way_name}を直進する",
-                "destination": "{destination}に向けて直進する"
+                "default": "直進です",
+                "name": "{way_name}を直進です",
+                "destination": "直進です。その先、{destination}方面です",
+                "junction_name": "{junction_name}を直進です"
             }
         },
         "use lane": {
             "no_lanes": {
-                "default": "直進する"
+                "default": "直進です"
             },
             "default": {
-                "default": "{lane_instruction}"
+                "default": "{lane_instruction}です"
             }
         }
     }
@@ -10475,27 +10654,32 @@ module.exports={
             "sharp left": {
                 "default": "급좌회전 하세요.",
                 "name": "급좌회전 하신 후 {way_name}로 가세요.",
-                "destination": "급좌회전 하신 후 {destination}로 가세요."
+                "destination": "급좌회전 하신 후 {destination}로 가세요.",
+                "junction_name": "{junction_name}에서 급좌회전."
             },
             "sharp right": {
                 "default": "급우회전 하세요.",
                 "name": "급우회전 하고 {way_name}로 가세요.",
-                "destination": "급우회전 하신 후 {destination}로 가세요."
+                "destination": "급우회전 하신 후 {destination}로 가세요.",
+                "junction_name": "{junction_name}에서 급우회전."
             },
             "slight left": {
                 "default": "약간 좌회전하세요.",
                 "name": "약간 좌회전 하고 {way_name}로 가세요.",
-                "destination": "약간 좌회전 하신 후 {destination}로 가세요."
+                "destination": "약간 좌회전 하신 후 {destination}로 가세요.",
+                "junction_name": "{junction_name}에서 약간 좌회전."
             },
             "slight right": {
                 "default": "약간 우회전하세요.",
                 "name": "약간 우회전 하고 {way_name}로 가세요.",
-                "destination": "약간 우회전 하신 후 {destination}로 가세요."
+                "destination": "약간 우회전 하신 후 {destination}로 가세요.",
+                "junction_name": "{junction_name}에서 약간 우회전."
             },
             "uturn": {
                 "default": "유턴 하세요",
                 "name": "유턴해서 {way_name}로 가세요.",
-                "destination": "유턴하신 후 {destination}로 가세요."
+                "destination": "유턴하신 후 {destination}로 가세요.",
+                "junction_name": "{junction_name}에서 유턴 하세요."
             }
         },
         "depart": {
@@ -10509,17 +10693,20 @@ module.exports={
             "default": {
                 "default": "{modifier} 회전하세요.",
                 "name": "{modifier}회전하고 {way_name}로 가세요.",
-                "destination": "{modifier}회전 하신 후 {destination}로 가세요."
+                "destination": "{modifier}회전 하신 후 {destination}로 가세요.",
+                "junction_name": "{junction_name}에서 {modifier} 회전하세요."
             },
             "straight": {
                 "default": "계속 직진해 주세요.",
                 "name": "{way_name}로 계속 직진해 주세요.",
-                "destination": "{destination}까지 직진해 주세요."
+                "destination": "{destination}까지 직진해 주세요.",
+                "junction_name": "{junction_name}에서 계속 직진해 주세요."
             },
             "uturn": {
                 "default": "도로 끝까지 가서 유턴해 주세요.",
                 "name": "도로 끝까지 가서 유턴해서 {way_name}로 가세요.",
-                "destination": "도로 끝까지 가서 유턴해서 {destination} 까지 가세요."
+                "destination": "도로 끝까지 가서 유턴해서 {destination} 까지 가세요.",
+                "junction_name": "{junction_name}에서 유턴 하세요."
             }
         },
         "fork": {
@@ -10806,22 +10993,26 @@ module.exports={
             "default": {
                 "default": "{modifier} 하세요.",
                 "name": "{modifier} 하시고 {way_name}로 가세요.",
-                "destination": "{modifier} 하시고 {destination}까지 가세요."
+                "destination": "{modifier} 하시고 {destination}까지 가세요.",
+                "junction_name": "{junction_name}에서 {modifier} 하세요."
             },
             "left": {
                 "default": "좌회전 하세요.",
                 "name": "좌회전 하시고 {way_name}로 가세요.",
-                "destination": "좌회전 하시고 {destination}까지 가세요."
+                "destination": "좌회전 하시고 {destination}까지 가세요.",
+                "junction_name": "{junction_name}에서 좌회전."
             },
             "right": {
                 "default": "우회전 하세요.",
                 "name": "우회전 하시고 {way_name}로 가세요.",
-                "destination": "우회전 하시고 {destination}까지 가세요."
+                "destination": "우회전 하시고 {destination}까지 가세요.",
+                "junction_name": "{junction_name}에서 우회전."
             },
             "straight": {
                 "default": "직진 하세요.",
                 "name": "직진하시고 {way_name}로 가세요.",
-                "destination": "직진하시고 {destination}까지 가세요."
+                "destination": "직진하시고 {destination}까지 가세요.",
+                "junction_name": "{junction_name}에서 직진 하세요."
             }
         },
         "use lane": {
@@ -10970,27 +11161,32 @@ module.exports={
             "sharp left": {
                 "default": "ဘယ်ဘက်ထောင့်ချိုးကွေ့ပါ",
                 "name": "{way_name}ပေါ်တွင်နေရန် ဘယ်ဘက်ထောင့်ချိုးကွေ့ပါ",
-                "destination": "{destination}ဆီသို့ ဘယ်ဘက်ထောင့်ချိုးကွေ့ပါ"
+                "destination": "{destination}ဆီသို့ ဘယ်ဘက်ထောင့်ချိုးကွေ့ပါ",
+                "junction_name": "{junction_name}ပေါ်တွင်နေရန် ဘယ်ဘက်ထောင့်ချိုးကွေ့ပါ"
             },
             "sharp right": {
                 "default": "ညာဘက် ထောင့်ချိုးကွေ့ပါ",
                 "name": "{way_name}ပေါ်တွင်နေရန် ညာဘက်ထောင့်ချိုးကွေ့ပါ",
-                "destination": "{destination}ဆီသို့ ညာဘက်ထောင့်ချိုးကွေ့ပါ"
+                "destination": "{destination}ဆီသို့ ညာဘက်ထောင့်ချိုးကွေ့ပါ",
+                "junction_name": "{junction_name}ပေါ်တွင်နေရန် ညာဘက်ထောင့်ချိုးကွေ့ပါ"
             },
             "slight left": {
                 "default": "ဘယ်ဘက် အနည်းငယ်ကွေ့ပါ",
                 "name": "{way_name}ပေါ်တွင်နေရန် ဘယ်ဘက်အနည်းငယ်ကွေ့ပါ",
-                "destination": "{destination}ဆီသို့ ဘယ်ဘက်အနည်းငယ်ချိုးကွေ့ပါ"
+                "destination": "{destination}ဆီသို့ ဘယ်ဘက်အနည်းငယ်ချိုးကွေ့ပါ",
+                "junction_name": "{junction_name}ပေါ်တွင်နေရန် ဘယ်ဘက်အနည်းငယ်ကွေ့ပါ"
             },
             "slight right": {
                 "default": "ညာဘက် အနည်းငယ်ချိုးကွေ့ပါ",
                 "name": "{way_name}ပေါ်တွင်နေရန် ညာဘက်အနည်းငယ်ကွေ့ပါ",
-                "destination": "{destination}ဆီသို့ ညာဘက်အနည်းငယ်ချိုးကွေ့ပါ"
+                "destination": "{destination}ဆီသို့ ညာဘက်အနည်းငယ်ချိုးကွေ့ပါ",
+                "junction_name": "{junction_name}ပေါ်တွင်နေရန် ညာဘက်အနည်းငယ်ကွေ့ပါ"
             },
             "uturn": {
                 "default": "ဂ-ကွေ့ ကွေ့ပါ",
                 "name": "{way_name}လမ်းဘက်သို့ ဂ-ကွေ့ကွေ့ပြီးဆက်သွားပါ",
-                "destination": "{destination}ဆီသို့ ဂကွေ့ချိုးကွေ့ပါ"
+                "destination": "{destination}ဆီသို့ ဂကွေ့ချိုးကွေ့ပါ",
+                "junction_name": "{junction_name}လမ်းဘက်သို့ ဂ-ကွေ့ကွေ့ပြီးဆက်သွားပါ"
             }
         },
         "depart": {
@@ -11004,17 +11200,20 @@ module.exports={
             "default": {
                 "default": "{modifier}သို့လှည့်ပါ",
                 "name": "{way_name}​ပေါ်သို့ {modifier}ကိုလှည့်ပါ",
-                "destination": "{destination}ဆီသို့ {modifier}ကို လှည့်ပါ"
+                "destination": "{destination}ဆီသို့ {modifier}ကို လှည့်ပါ",
+                "junction_name": "{junction_name}​ပေါ်သို့ {modifier}ကိုလှည့်ပါ"
             },
             "straight": {
                 "default": "ဖြောင့်ဖြောင့်တန်းတန်း ဆက်သွားပါ",
                 "name": "{way_name}​ပေါ်သို့တည့်တည့်ဆက်သွားပါ",
-                "destination": "{destination}ဆီသို့တည့်တည့်ဆက်သွားပါ"
+                "destination": "{destination}ဆီသို့တည့်တည့်ဆက်သွားပါ",
+                "junction_name": "{junction_name}​ပေါ်သို့တည့်တည့်ဆက်သွားပါ"
             },
             "uturn": {
                 "default": "လမ်းအဆုံးတွင် ဂ-ကွေ့ကွေ့ပါ",
                 "name": "လမ်းအဆုံးတွင် {way_name}​ပေါ်သို့ဂ-ကွေ့ကွေ့ပါ",
-                "destination": "လမ်းအဆုံးတွင်{destination}ဆီသို့ ဂကွေ့ချိုးကွေ့ပါ"
+                "destination": "လမ်းအဆုံးတွင်{destination}ဆီသို့ ဂကွေ့ချိုးကွေ့ပါ",
+                "junction_name": "လမ်းအဆုံးတွင် {junction_name}​ပေါ်သို့ဂ-ကွေ့ကွေ့ပါ"
             }
         },
         "fork": {
@@ -11300,23 +11499,27 @@ module.exports={
         "turn": {
             "default": {
                 "default": "{modifier}ကိုလှည့်ပါ",
-                "name": "{modifier}ပေါ်သို့{way_name}ကိုဆက်သွားပါ ",
-                "destination": "{modifier}ဆီသို့{destination}ကို ဆက်သွားပါ "
+                "name": "{modifier}ပေါ်သို့{way_name}ကိုဆက်သွားပါ",
+                "destination": "{modifier}ဆီသို့{destination}ကို ဆက်သွားပါ ",
+                "junction_name": "{modifier}ပေါ်သို့{junction_name}ကိုဆက်သွားပါ"
             },
             "left": {
                 "default": "ဘယ်ဘက်သို့ပြန်လှည့်ပါ",
-                "name": "{way_name}ပေါ်သို့ဘယ်ဘက်ကိုဆက်သွားပါ ",
-                "destination": "{destination}ဘယ်ဘက်သို့ ကွေ့ပါ"
+                "name": "{way_name}ပေါ်သို့ဘယ်ဘက်ကိုဆက်သွားပါ",
+                "destination": "{destination}ဘယ်ဘက်သို့ ကွေ့ပါ",
+                "junction_name": "{junction_name}ပေါ်သို့ဘယ်ဘက်ကိုဆက်သွားပါ"
             },
             "right": {
                 "default": "ညာဘက်သို့ပြန်လှည့်ပါ",
-                "name": "{way_name}ပေါ်သို့ညာဘက်ကိုလာရောက်ပေါင်းဆုံပါ ",
-                "destination": "{destination}ညာဘက်သို့ ကွေ့ပါ"
+                "name": "{way_name}ပေါ်သို့ညာဘက်ကိုလာရောက်ပေါင်းဆုံပါ",
+                "destination": "{destination}ညာဘက်သို့ ကွေ့ပါ",
+                "junction_name": "{junction_name}ပေါ်သို့ညာဘက်ကိုလာရောက်ပေါင်းဆုံပါ"
             },
             "straight": {
                 "default": "တည့်တည့်သွားပါ",
                 "name": "{way_name}ပေါ်သို့တည့်တည့်သွားပါ",
-                "destination": "{destination}ဆီသို့တည့်တည့်သွားပါ"
+                "destination": "{destination}ဆီသို့တည့်တည့်သွားပါ",
+                "junction_name": "{junction_name}ပေါ်သို့တည့်တည့်သွားပါ"
             }
         },
         "use lane": {
@@ -11410,7 +11613,7 @@ module.exports={
                 "upcoming": "Uw {nth} bestemming bevindt zich aan de rechterkant",
                 "short": "U bent gearriveerd",
                 "short-upcoming": "U zult aankomen",
-                "named": "U bent gearriveerd bij {waypoint_name}, de bestemming is aan de  rechterkant"
+                "named": "U bent gearriveerd bij {waypoint_name}, de bestemming is aan de rechterkant"
             },
             "sharp left": {
                 "default": "Je bent gearriveerd. De {nth} bestemming bevindt zich links.",
@@ -11424,21 +11627,21 @@ module.exports={
                 "upcoming": "Uw {nth} bestemming bevindt zich aan de rechterkant",
                 "short": "U bent gearriveerd",
                 "short-upcoming": "U zult aankomen",
-                "named": "U bent gearriveerd bij {waypoint_name},  de bestemming is aan de rechterkant"
+                "named": "U bent gearriveerd bij {waypoint_name}, de bestemming is aan de rechterkant"
             },
             "slight right": {
                 "default": "Je bent gearriveerd. De {nth} bestemming bevindt zich rechts.",
                 "upcoming": "Uw {nth} bestemming bevindt zich aan de rechterkant",
                 "short": "U bent gearriveerd",
                 "short-upcoming": "U zult aankomen",
-                "named": "U bent gearriveerd bij {waypoint_name},  de bestemming is aan de rechterkant"
+                "named": "U bent gearriveerd bij {waypoint_name}, de bestemming is aan de rechterkant"
             },
             "slight left": {
                 "default": "Je bent gearriveerd. De {nth} bestemming bevindt zich links.",
                 "upcoming": "Uw {nth} bestemming bevindt zich aan de linkerkant",
                 "short": "U bent gearriveerd",
                 "short-upcoming": "U zult aankomen",
-                "named": "U bent gearriveerd bij {waypoint_name},  de bestemming is aan de linkerkant"
+                "named": "U bent gearriveerd bij {waypoint_name}, de bestemming is aan de linkerkant"
             },
             "straight": {
                 "default": "Je bent gearriveerd. De {nth} bestemming bevindt zich voor je.",
@@ -11465,27 +11668,32 @@ module.exports={
             "sharp left": {
                 "default": "Linksaf",
                 "name": "Sla scherp links af om op {way_name} te blijven",
-                "destination": "Linksaf richting {destination}"
+                "destination": "Linksaf richting {destination}",
+                "junction_name": "Linksaf bij {junction_name}"
             },
             "sharp right": {
                 "default": "Rechtsaf",
                 "name": "Sla scherp rechts af om op {way_name} te blijven",
-                "destination": "Rechtsaf richting {destination}"
+                "destination": "Rechtsaf richting {destination}",
+                "junction_name": "Rechtsaf bij {junction_name}"
             },
             "slight left": {
                 "default": "Ga links",
                 "name": "Links afbuigen om op {way_name} te blijven",
-                "destination": "Rechts afbuigen om op {destination} te blijven"
+                "destination": "Rechts afbuigen om op {destination} te blijven",
+                "junction_name": "Ga links bij {junction_name}"
             },
             "slight right": {
                 "default": "Rechts afbuigen",
                 "name": "Rechts afbuigen om op {way_name} te blijven",
-                "destination": "Rechts afbuigen richting {destination}"
+                "destination": "Rechts afbuigen richting {destination}",
+                "junction_name": "Rechts afbuigen bij {junction_name}"
             },
             "uturn": {
                 "default": "Keer om",
                 "name": "Draai om en ga verder op {way_name}",
-                "destination": "Keer om richting {destination}"
+                "destination": "Keer om richting {destination}",
+                "junction_name": "Keer om bij {junction_name}"
             }
         },
         "depart": {
@@ -11499,17 +11707,20 @@ module.exports={
             "default": {
                 "default": "Ga {modifier}",
                 "name": "Ga {modifier} naar {way_name}",
-                "destination": "Ga {modifier} richting {destination}"
+                "destination": "Ga {modifier} richting {destination}",
+                "junction_name": "Ga {modifier} bij {junction_name}"
             },
             "straight": {
                 "default": "Ga in de aangegeven richting",
                 "name": "Ga naar {way_name}",
-                "destination": "Ga richting {destination}"
+                "destination": "Ga richting {destination}",
+                "junction_name": "Ga rechtdoor bij {junction_name}"
             },
             "uturn": {
                 "default": "Keer om",
                 "name": "Keer om naar {way_name}",
-                "destination": "Keer om richting {destination}"
+                "destination": "Keer om richting {destination}",
+                "junction_name": "Keer om bij {junction_name}"
             }
         },
         "fork": {
@@ -11534,7 +11745,7 @@ module.exports={
                 "destination": "Neem een scherpe bocht naar links, richting {destination}"
             },
             "sharp right": {
-                "default": "Neem  op de splitsing, een scherpe bocht, naar rechts",
+                "default": "Neem op de splitsing, een scherpe bocht, naar rechts",
                 "name": "Neem een scherpe bocht naar rechts, tot aan {way_name}",
                 "destination": "Neem een scherpe bocht naar rechts, richting {destination}"
             },
@@ -11796,22 +12007,26 @@ module.exports={
             "default": {
                 "default": "Ga {modifier}",
                 "name": "Ga {modifier} naar {way_name}",
-                "destination": "Ga {modifier} richting {destination}"
+                "destination": "Ga {modifier} richting {destination}",
+                "junction_name": "Ga {modifier} bij {junction_name}"
             },
             "left": {
                 "default": "Ga linksaf",
                 "name": "Ga linksaf naar {way_name}",
-                "destination": "Ga linksaf richting {destination}"
+                "destination": "Ga linksaf richting {destination}",
+                "junction_name": "Ga linksaf bij {junction_name}"
             },
             "right": {
                 "default": "Ga rechtsaf",
                 "name": "Ga rechtsaf naar {way_name}",
-                "destination": "Ga rechtsaf richting {destination}"
+                "destination": "Ga rechtsaf richting {destination}",
+                "junction_name": "Ga rechtsaf bij {junction_name}"
             },
             "straight": {
                 "default": "Ga rechtdoor",
                 "name": "Ga rechtdoor naar {way_name}",
-                "destination": "Ga rechtdoor richting {destination}"
+                "destination": "Ga rechtdoor richting {destination}",
+                "junction_name": "Ga rechtdoor bij {junction_name}"
             }
         },
         "use lane": {
@@ -11960,27 +12175,32 @@ module.exports={
             "sharp left": {
                 "default": "Sving skarpt til venstre",
                 "name": "Sving skarpt til venstre for å bli værende på {way_name}",
-                "destination": "Sving skarpt til venstre mot {destination}"
+                "destination": "Sving skarpt til venstre mot {destination}",
+                "junction_name": "Sving skarpt til venstre i {junction_name}"
             },
             "sharp right": {
                 "default": "Sving skarpt til høyre",
                 "name": "Sving skarpt til høyre for å bli værende på {way_name}",
-                "destination": "Sving skarpt mot {destination}"
+                "destination": "Sving skarpt mot {destination}",
+                "junction_name": "Sving skarpt til høyre i {junction_name}"
             },
             "slight left": {
                 "default": "Sving svakt til venstre",
                 "name": "Sving svakt til venstre for å bli værende på {way_name}",
-                "destination": "Sving svakt til venstre mot {destination}"
+                "destination": "Sving svakt til venstre mot {destination}",
+                "junction_name": "Sving svakt til venstre i {junction_name}"
             },
             "slight right": {
                 "default": "Sving svakt til høyre",
                 "name": "Sving svakt til høyre for å bli værende på {way_name}",
-                "destination": "Sving svakt til høyre mot {destination}"
+                "destination": "Sving svakt til høyre mot {destination}",
+                "junction_name": "Sving svakt til høyre i {junction_name}"
             },
             "uturn": {
                 "default": "Ta en U-sving",
                 "name": "Ta en U-sving og fortsett på {way_name}",
-                "destination": "Ta en U-sving mot {destination}"
+                "destination": "Ta en U-sving mot {destination}",
+                "junction_name": "Ta en U-sving i {junction_name}"
             }
         },
         "depart": {
@@ -11994,17 +12214,20 @@ module.exports={
             "default": {
                 "default": "Sving {modifier}",
                 "name": "Ta til {modifier} inn på {way_name}",
-                "destination": "Sving {modifier} mot {destination}"
+                "destination": "Sving {modifier} mot {destination}",
+                "junction_name": "Sving {modifier} i {junction_name}"
             },
             "straight": {
                 "default": "Fortsett rett frem",
-                "name": "Fortsett rett frem til  {way_name}",
-                "destination": "Fortsett rett frem mot {destination}"
+                "name": "Fortsett rett frem til {way_name}",
+                "destination": "Fortsett rett frem mot {destination}",
+                "junction_name": "Fortsett rett frem i {junction_name}"
             },
             "uturn": {
                 "default": "Ta en U-sving i enden av veien",
                 "name": "Ta en U-sving til {way_name} i enden av veien",
-                "destination": "Ta en U-sving mot {destination} i enden av veien"
+                "destination": "Ta en U-sving mot {destination} i enden av veien",
+                "junction_name": "Ta en U-sving i {junction_name}"
             }
         },
         "fork": {
@@ -12080,7 +12303,7 @@ module.exports={
             "default": {
                 "default": "Fortsett {modifier}",
                 "name": "Fortsett {modifier} til {way_name}",
-                "destination": "Fortsett {modifier} mot  {destination}"
+                "destination": "Fortsett {modifier} mot {destination}"
             },
             "straight": {
                 "default": "Fortsett rett frem",
@@ -12117,7 +12340,7 @@ module.exports={
             "default": {
                 "default": "Fortsett {modifier}",
                 "name": "Fortsett {modifier} til {way_name}",
-                "destination": "Fortsett {modifier} mot  {destination}"
+                "destination": "Fortsett {modifier} mot {destination}"
             },
             "uturn": {
                 "default": "Ta en U-sving",
@@ -12269,7 +12492,7 @@ module.exports={
             },
             "straight": {
                 "default": "Fortsett rett frem",
-                "name": "Fortsett rett frem til  {way_name}",
+                "name": "Fortsett rett frem til {way_name}",
                 "destination": "Fortsett rett frem mot {destination}"
             }
         },
@@ -12291,22 +12514,26 @@ module.exports={
             "default": {
                 "default": "Ta en {modifier}",
                 "name": "Ta en {modifier} inn på {way_name}",
-                "destination": "Ta en {modifier} mot {destination}"
+                "destination": "Ta en {modifier} mot {destination}",
+                "junction_name": "Ta en {modifier} i {junction_name}"
             },
             "left": {
                 "default": "Sving til venstre",
                 "name": "Sving til venstre inn på {way_name}",
-                "destination": "Sving til venstre mot {destination}"
+                "destination": "Sving til venstre mot {destination}",
+                "junction_name": "Sving til venstre i {junction_name}"
             },
             "right": {
                 "default": "Sving til høyre",
                 "name": "Sving til høyre inn på {way_name}",
-                "destination": "Sving til høyre mot {destination}"
+                "destination": "Sving til høyre mot {destination}",
+                "junction_name": "Sving til høyre i {junction_name}"
             },
             "straight": {
                 "default": "Kjør rett frem",
                 "name": "Kjør rett frem og inn på {way_name}",
-                "destination": "Kjør rett frem mot {destination}"
+                "destination": "Kjør rett frem mot {destination}",
+                "junction_name": "Kjør rett frem i {junction_name}"
             }
         },
         "use lane": {
@@ -12455,27 +12682,32 @@ module.exports={
             "sharp left": {
                 "default": "Skręć ostro w lewo",
                 "name": "Skręć w lewo w ostry zakręt, aby pozostać na {way_name}",
-                "destination": "Skręć ostro w lewo w kierunku {destination}"
+                "destination": "Skręć ostro w lewo w kierunku {destination}",
+                "junction_name": "Skręć ostro w lewo na {junction_name}"
             },
             "sharp right": {
                 "default": "Skręć ostro w prawo",
                 "name": "Skręć w prawo w ostry zakręt, aby pozostać na {way_name}",
-                "destination": "Skręć ostro w prawo w kierunku {destination}"
+                "destination": "Skręć ostro w prawo w kierunku {destination}",
+                "junction_name": "Skręć ostro w prawo na {junction_name}"
             },
             "slight left": {
                 "default": "Skręć w lewo w łagodny zakręt",
                 "name": "Skręć w lewo w łagodny zakręt, aby pozostać na {way_name}",
-                "destination": "Skręć w lewo w łagodny zakręt na {destination}"
+                "destination": "Skręć w lewo w łagodny zakręt na {destination}",
+                "junction_name": "Skręć w lewo w łagodny zakręt na {junction_name}"
             },
             "slight right": {
                 "default": "Skręć w prawo w łagodny zakręt",
                 "name": "Skręć w prawo w łagodny zakręt, aby pozostać na {way_name}",
-                "destination": "Skręć w prawo w łagodny zakręt na {destination}"
+                "destination": "Skręć w prawo w łagodny zakręt na {destination}",
+                "junction_name": "Skręć w prawo w łagodny zakręt na {junction_name}"
             },
             "uturn": {
                 "default": "Zawróć",
                 "name": "Zawróć i jedź dalej {way_name}",
-                "destination": "Zawróć w kierunku {destination}"
+                "destination": "Zawróć w kierunku {destination}",
+                "junction_name": "Zawróć na {junction_name}"
             }
         },
         "depart": {
@@ -12489,17 +12721,20 @@ module.exports={
             "default": {
                 "default": "Skręć {modifier}",
                 "name": "Skręć {modifier} na {way_name}",
-                "destination": "Skręć {modifier} w kierunku {destination}"
+                "destination": "Skręć {modifier} w kierunku {destination}",
+                "junction_name": "Skręć {modifier} na {junction_name}"
             },
             "straight": {
                 "default": "Kontynuuj prosto",
                 "name": "Kontynuuj prosto na {way_name}",
-                "destination": "Kontynuuj prosto w kierunku {destination}"
+                "destination": "Kontynuuj prosto w kierunku {destination}",
+                "junction_name": "Kontynuuj prosto na {junction_name}"
             },
             "uturn": {
                 "default": "Zawróć na końcu ulicy",
                 "name": "Zawróć na końcu ulicy na {way_name}",
-                "destination": "Zawróć na końcu ulicy w kierunku {destination}"
+                "destination": "Zawróć na końcu ulicy w kierunku {destination}",
+                "junction_name": "Zawróć na {junction_name}"
             }
         },
         "fork": {
@@ -12816,22 +13051,26 @@ module.exports={
             "default": {
                 "default": "{modifier}",
                 "name": "{modifier} na {way_name}",
-                "destination": "{modifier} w kierunku {destination}"
+                "destination": "{modifier} w kierunku {destination}",
+                "junction_name": "{modifier} na {junction_name}"
             },
             "left": {
                 "default": "Skręć w lewo",
                 "name": "Skręć w lewo na {way_name}",
-                "destination": "Skręć w lewo w kierunku {destination}"
+                "destination": "Skręć w lewo w kierunku {destination}",
+                "junction_name": "Skręć w lewo na {junction_name}"
             },
             "right": {
                 "default": "Skręć w prawo",
                 "name": "Skręć w prawo na {way_name}",
-                "destination": "Skręć w prawo w kierunku {destination}"
+                "destination": "Skręć w prawo w kierunku {destination}",
+                "junction_name": "Skręć w prawo na {junction_name}"
             },
             "straight": {
                 "default": "Jedź prosto",
                 "name": "Jedź prosto na {way_name}",
-                "destination": "Jedź prosto w kierunku {destination}"
+                "destination": "Jedź prosto w kierunku {destination}",
+                "junction_name": "Jedź prosto na {junction_name}"
             }
         },
         "use lane": {
@@ -12960,7 +13199,7 @@ module.exports={
                 "upcoming": "Você vai chegar ao seu {nth} destino, em frente",
                 "short": "Você chegou",
                 "short-upcoming": "Você vai chegar",
-                "named": "You have arrived at {waypoint_name}, straight ahead"
+                "named": "Você chegou a {waypoint_name}, logo em frente"
             }
         },
         "continue": {
@@ -12980,27 +13219,32 @@ module.exports={
             "sharp left": {
                 "default": "Faça uma curva fechada a esquerda",
                 "name": "Faça uma curva fechada a esquerda para manter-se na {way_name}",
-                "destination": "Faça uma curva fechada a esquerda sentido {destination}"
+                "destination": "Faça uma curva fechada a esquerda sentido {destination}",
+                "junction_name": "Faça uma curva fechada a esquerda em {junction_name}"
             },
             "sharp right": {
                 "default": "Faça uma curva fechada a direita",
                 "name": "Faça uma curva fechada a direita para manter-se na {way_name}",
-                "destination": "Faça uma curva fechada a direita sentido {destination}"
+                "destination": "Faça uma curva fechada a direita sentido {destination}",
+                "junction_name": "Faça uma curva fechada a direita em {junction_name}"
             },
             "slight left": {
                 "default": "Faça uma curva suave a esquerda",
                 "name": "Faça uma curva suave a esquerda para manter-se na {way_name}",
-                "destination": "Faça uma curva suave a esquerda em direção a {destination}"
+                "destination": "Faça uma curva suave a esquerda em direção a {destination}",
+                "junction_name": "Faça uma curva suave a esquerda em {junction_name}"
             },
             "slight right": {
                 "default": "Faça uma curva suave a direita",
                 "name": "Faça uma curva suave a direita para manter-se na {way_name}",
-                "destination": "Faça uma curva suave a direita em direção a {destination}"
+                "destination": "Faça uma curva suave a direita em direção a {destination}",
+                "junction_name": "Faça uma curva suave a direita em {junction_name}"
             },
             "uturn": {
                 "default": "Faça o retorno",
                 "name": "Faça o retorno e continue em {way_name}",
-                "destination": "Faça o retorno sentido {destination}"
+                "destination": "Faça o retorno sentido {destination}",
+                "junction_name": "Faça o retorno em {junction_name}"
             }
         },
         "depart": {
@@ -13014,34 +13258,37 @@ module.exports={
             "default": {
                 "default": "Vire {modifier}",
                 "name": "Vire {modifier} em {way_name}",
-                "destination": "Vire {modifier} sentido {destination}"
+                "destination": "Vire {modifier} sentido {destination}",
+                "junction_name": "Vire {modifier} em {junction_name}"
             },
             "straight": {
                 "default": "Continue em frente",
                 "name": "Continue em frente em {way_name}",
-                "destination": "Continue em frente sentido {destination}"
+                "destination": "Continue em frente sentido {destination}",
+                "junction_name": "Continue em frente em {junction_name}"
             },
             "uturn": {
                 "default": "Faça o retorno no fim da rua",
                 "name": "Faça o retorno em {way_name} no fim da rua",
-                "destination": "Faça o retorno sentido {destination} no fim da rua"
+                "destination": "Faça o retorno sentido {destination} no fim da rua",
+                "junction_name": "Faça o retorno em {junction_name}"
             }
         },
         "fork": {
             "default": {
                 "default": "Mantenha-se {modifier} na bifurcação",
-                "name": "Mantenha-se {modifier} na bifurcação em {way_name}",
-                "destination": "Mantenha-se {modifier} na bifurcação sentido {destination}"
+                "name": "Permaneça {modifier} para {way_name}",
+                "destination": "Permaneça {modifier} em direção à {destination}"
             },
             "slight left": {
                 "default": "Mantenha-se à esquerda na bifurcação",
-                "name": "Mantenha-se à esquerda na bifurcação em {way_name}",
-                "destination": "Mantenha-se à esquerda na bifurcação sentido {destination}"
+                "name": "Permaneça à esquerda para {way_name}",
+                "destination": "Permaneça à esquerda em direção à {destination}"
             },
             "slight right": {
                 "default": "Mantenha-se à direita na bifurcação",
-                "name": "Mantenha-se à direita na bifurcação em {way_name}",
-                "destination": "Mantenha-se à direita na bifurcação sentido {destination}"
+                "name": "Permaneça à direita para {way_name}",
+                "destination": "Permaneça à direita em direção à {destination}"
             },
             "sharp left": {
                 "default": "Faça uma curva fechada à esquerda na bifurcação",
@@ -13067,8 +13314,8 @@ module.exports={
             },
             "straight": {
                 "default": "Mesclar",
-                "name": "Entre reto na {way_name}",
-                "destination": "Entre reto em direção à {destination}"
+                "name": "Entre na {way_name}",
+                "destination": "Mesclar para {destination}"
             },
             "slight left": {
                 "default": "Entre à esquerda",
@@ -13158,7 +13405,7 @@ module.exports={
                 "name": "Pegue a rampa à esquerda em {way_name}",
                 "destination": "Pegue a rampa à esquerda sentido {destination}",
                 "exit": "Pegue a saída {exit} à esquerda",
-                "exit_destination": "Pegue a saída {exit}  à esquerda em direção à {destination}"
+                "exit_destination": "Pegue a saída {exit} à esquerda em direção à {destination}"
             },
             "right": {
                 "default": "Pegue a rampa à direita",
@@ -13172,7 +13419,7 @@ module.exports={
                 "name": "Pegue a rampa à esquerda em {way_name}",
                 "destination": "Pegue a rampa à esquerda sentido {destination}",
                 "exit": "Pegue a saída {exit} à esquerda",
-                "exit_destination": "Pegue a saída {exit}  à esquerda em direção à {destination}"
+                "exit_destination": "Pegue a saída {exit} à esquerda em direção à {destination}"
             },
             "sharp right": {
                 "default": "Pegue a rampa à direita",
@@ -13186,7 +13433,7 @@ module.exports={
                 "name": "Pegue a rampa à esquerda em {way_name}",
                 "destination": "Pegue a rampa à esquerda sentido {destination}",
                 "exit": "Pegue a saída {exit} à esquerda",
-                "exit_destination": "Pegue a saída {exit}  à esquerda em direção à {destination}"
+                "exit_destination": "Pegue a saída {exit} à esquerda em direção à {destination}"
             },
             "slight right": {
                 "default": "Pegue a rampa à direita",
@@ -13237,7 +13484,7 @@ module.exports={
             "default": {
                 "default": {
                     "default": "Entre na rotatória",
-                    "name": "Entre na rotatória e saia na {way_name}",
+                    "name": "Entre na rotatória e saia em {way_name}",
                     "destination": "Entre na rotatória e saia sentido {destination}"
                 },
                 "name": {
@@ -13246,9 +13493,9 @@ module.exports={
                     "destination": "Entre em {rotary_name} e saia sentido {destination}"
                 },
                 "exit": {
-                    "default": "Entre na rotatória e pegue a {exit_number} saída",
-                    "name": "Entre na rotatória e pegue a {exit_number} saída na {way_name}",
-                    "destination": "Entre na rotatória e pegue a {exit_number} saída sentido {destination}"
+                    "default": "Entre na rotatória e saia na {exit_number} saída",
+                    "name": "Entre na rotatória e saia na {exit_number} saída em {way_name}",
+                    "destination": "Entre na rotatória e saia na {exit_number} saída sentido {destination}"
                 },
                 "name_exit": {
                     "default": "Entre em {rotary_name} e saia na {exit_number} saída",
@@ -13260,13 +13507,13 @@ module.exports={
         "roundabout": {
             "default": {
                 "exit": {
-                    "default": "Entre na rotatória e pegue a {exit_number} saída",
-                    "name": "Entre na rotatória e pegue a {exit_number} saída na {way_name}",
-                    "destination": "Entre na rotatória e pegue a {exit_number} saída sentido {destination}"
+                    "default": "Entre na rotatória e saia na {exit_number} saída",
+                    "name": "Entre na rotatória e saia na {exit_number} saída em {way_name}",
+                    "destination": "Entre na rotatória e saia na {exit_number} saída sentido {destination}"
                 },
                 "default": {
                     "default": "Entre na rotatória",
-                    "name": "Entre na rotatória e saia na {way_name}",
+                    "name": "Entre na rotatória e saia em {way_name}",
                     "destination": "Entre na rotatória e saia sentido {destination}"
                 }
             }
@@ -13311,22 +13558,26 @@ module.exports={
             "default": {
                 "default": "Siga {modifier}",
                 "name": "Siga {modifier} em {way_name}",
-                "destination": "Siga {modifier} sentido {destination}"
+                "destination": "Siga {modifier} sentido {destination}",
+                "junction_name": "Siga {modifier} em {junction_name}"
             },
             "left": {
                 "default": "Vire à esquerda",
                 "name": "Vire à esquerda em {way_name}",
-                "destination": "Vire à esquerda sentido {destination}"
+                "destination": "Vire à esquerda sentido {destination}",
+                "junction_name": "Vire à esquerda em {junction_name}"
             },
             "right": {
                 "default": "Vire à direita",
                 "name": "Vire à direita em {way_name}",
-                "destination": "Vire à direita sentido {destination}"
+                "destination": "Vire à direita sentido {destination}",
+                "junction_name": "Vire à direita em {junction_name}"
             },
             "straight": {
                 "default": "Siga em frente",
                 "name": "Siga em frente em {way_name}",
-                "destination": "Siga em frente sentido {destination}"
+                "destination": "Siga em frente sentido {destination}",
+                "junction_name": "Siga em frente em {junction_name}"
             }
         },
         "use lane": {
@@ -13455,7 +13706,7 @@ module.exports={
                 "upcoming": "Está a chegar ao seu {nth} destino, em frente",
                 "short": "Chegou",
                 "short-upcoming": "Está a chegar",
-                "named": "Chegou a {waypoint_name}, em frente"
+                "named": "Chegou a {waypoint_name}, mesmo em frente"
             }
         },
         "continue": {
@@ -13475,27 +13726,32 @@ module.exports={
             "sharp left": {
                 "default": "Vire acentuadamente à esquerda",
                 "name": "Vire acentuadamente à esquerda para se manter em {way_name}",
-                "destination": "Vire acentuadamente à esquerda em direção a {destination}"
+                "destination": "Vire acentuadamente à esquerda em direção a {destination}",
+                "junction_name": "Vire acentuadamente à esquerda em {junction_name}"
             },
             "sharp right": {
                 "default": "Vire acentuadamente à direita",
                 "name": "Vire acentuadamente à direita para se manter em {way_name}",
-                "destination": "Vire acentuadamente à direita em direção a {destination}"
+                "destination": "Vire acentuadamente à direita em direção a {destination}",
+                "junction_name": "Vire acentuadamente à direita em {junction_name}"
             },
             "slight left": {
                 "default": "Vire ligeiramente à esquerda",
                 "name": "Vire ligeiramente à esquerda para se manter em {way_name}",
-                "destination": "Vire ligeiramente à esquerda em direção a {destination}"
+                "destination": "Vire ligeiramente à esquerda em direção a {destination}",
+                "junction_name": "Vire ligeiramente à esquerda em {junction_name}"
             },
             "slight right": {
                 "default": "Vire ligeiramente à direita",
                 "name": "Vire ligeiramente à direita para se manter em {way_name}",
-                "destination": "Vire ligeiramente à direita em direção a {destination}"
+                "destination": "Vire ligeiramente à direita em direção a {destination}",
+                "junction_name": "Vire ligeiramente à direita em {junction_name}"
             },
             "uturn": {
                 "default": "Faça inversão de marcha",
                 "name": "Faça inversão de marcha e continue em {way_name}",
-                "destination": "Faça inversão de marcha em direção a {destination}"
+                "destination": "Faça inversão de marcha em direção a {destination}",
+                "junction_name": "Faça inversão de marcha em {junction_name}"
             }
         },
         "depart": {
@@ -13509,17 +13765,20 @@ module.exports={
             "default": {
                 "default": "Vire {modifier}",
                 "name": "Vire {modifier} para {way_name}",
-                "destination": "Vire {modifier} em direção a {destination}"
+                "destination": "Vire {modifier} em direção a {destination}",
+                "junction_name": "Vire {modifier} em {junction_name}"
             },
             "straight": {
                 "default": "Continue em frente",
                 "name": "Continue em frente para {way_name}",
-                "destination": "Continue em frente em direção a {destination}"
+                "destination": "Continue em frente em direção a {destination}",
+                "junction_name": "Continue em frente em {junction_name}"
             },
             "uturn": {
                 "default": "No final da estrada faça uma inversão de marcha",
                 "name": "No final da estrada faça uma inversão de marcha para {way_name} ",
-                "destination": "No final da estrada faça uma inversão de marcha em direção a {destination}"
+                "destination": "No final da estrada faça uma inversão de marcha em direção a {destination}",
+                "junction_name": "Faça uma inversão de marcha em {junction_name}"
             }
         },
         "fork": {
@@ -13741,9 +14000,9 @@ module.exports={
                     "destination": "Entre em {rotary_name} e saia em direção a {destination}"
                 },
                 "exit": {
-                    "default": "Entre na rotunda e saia na saída {exit_number}",
-                    "name": "Entre na rotunda e saia na saída {exit_number} para {way_name}",
-                    "destination": "Entre na rotunda e saia na saída {exit_number} em direção a {destination}"
+                    "default": "Entre na rotunda e saia na {exit_number} saída",
+                    "name": "Entre na rotunda e saia na {exit_number} saída para {way_name}",
+                    "destination": "Entre na rotunda e saia na {exit_number} saída em direção a {destination}"
                 },
                 "name_exit": {
                     "default": "Entre em {rotary_name} e saia na saída {exit_number}",
@@ -13755,9 +14014,9 @@ module.exports={
         "roundabout": {
             "default": {
                 "exit": {
-                    "default": "Entre na rotunda e saia na saída {exit_number}",
-                    "name": "Entre na rotunda e saia na saída {exit_number} para {way_name}",
-                    "destination": "Entre na rotunda e saia na saída {exit_number} em direção a {destination}"
+                    "default": "Entre na rotunda e saia na {exit_number} saída",
+                    "name": "Entre na rotunda, saia na {exit_number} saída em direção a {way_name}",
+                    "destination": "Entre na rotunda e saia na {exit_number} saída em direção a {destination}"
                 },
                 "default": {
                     "default": "Entre na rotunda",
@@ -13806,22 +14065,26 @@ module.exports={
             "default": {
                 "default": "Siga {modifier}",
                 "name": "Siga {modifier} para{way_name}",
-                "destination": "Siga {modifier} em direção a {destination}"
+                "destination": "Siga {modifier} em direção a {destination}",
+                "junction_name": "Siga {modifier} em {junction_name}"
             },
             "left": {
                 "default": "Vire à esquerda",
                 "name": "Vire à esquerda para {way_name}",
-                "destination": "Vire à esquerda em direção a {destination}"
+                "destination": "Vire à esquerda em direção a {destination}",
+                "junction_name": "Vire à esquerda em {junction_name}"
             },
             "right": {
                 "default": "Vire à direita",
                 "name": "Vire à direita para {way_name}",
-                "destination": "Vire à direita em direção a {destination}"
+                "destination": "Vire à direita em direção a {destination}",
+                "junction_name": "Vire à direita em {junction_name}"
             },
             "straight": {
                 "default": "Vá em frente",
                 "name": "Vá em frente para {way_name}",
-                "destination": "Vá em frente em direção a {destination}"
+                "destination": "Vá em frente em direção a {destination}",
+                "junction_name": "Vá em frente em {junction_name}"
             }
         },
         "use lane": {
@@ -13970,27 +14233,32 @@ module.exports={
             "sharp left": {
                 "default": "Virați puternic la stânga",
                 "name": "Virați puternic la stânga pe {way_name}",
-                "destination": "Virați puternic la stânga spre {destination}"
+                "destination": "Virați puternic la stânga spre {destination}",
+                "junction_name": "Virați puternic la stânga la {junction_name}"
             },
             "sharp right": {
                 "default": "Virați puternic la dreapta",
                 "name": "Virați puternic la dreapta pe {way_name}",
-                "destination": "Virați puternic la dreapta spre {destination}"
+                "destination": "Virați puternic la dreapta spre {destination}",
+                "junction_name": "Virați puternic la dreapta la {junction_name}"
             },
             "slight left": {
                 "default": "Virați ușor la stânga",
                 "name": "Virați ușor la stânga pe {way_name}",
-                "destination": "Virați ușor la stânga spre {destination}"
+                "destination": "Virați ușor la stânga spre {destination}",
+                "junction_name": "Virați ușor la stânga la {junction_name}"
             },
             "slight right": {
                 "default": "Virați ușor la dreapta",
                 "name": "Virați ușor la dreapta pe {way_name}",
-                "destination": "Virați ușor la dreapta spre {destination}"
+                "destination": "Virați ușor la dreapta spre {destination}",
+                "junction_name": "Virați ușor la dreapta la {junction_name}"
             },
             "uturn": {
                 "default": "Întoarceți-vă",
                 "name": "Întoarceți-vă și continuați pe {way_name}",
-                "destination": "Întoarceți-vă spre {destination}"
+                "destination": "Întoarceți-vă spre {destination}",
+                "junction_name": "Întoarceți-vă la {junction_name}"
             }
         },
         "depart": {
@@ -14004,17 +14272,20 @@ module.exports={
             "default": {
                 "default": "Virați {modifier}",
                 "name": "Virați {modifier} pe {way_name}",
-                "destination": "Virați {modifier} spre {destination}"
+                "destination": "Virați {modifier} spre {destination}",
+                "junction_name": "Virați {modifier} la {junction_name}"
             },
             "straight": {
                 "default": "Continuați înainte",
                 "name": "Continuați înainte pe {way_name}",
-                "destination": "Continuați înainte spre {destination}"
+                "destination": "Continuați înainte spre {destination}",
+                "junction_name": "Continuați înainte la {junction_name}"
             },
             "uturn": {
                 "default": "Întoarceți-vă la sfârșitul drumului",
                 "name": "Întoarceți-vă pe {way_name} la sfârșitul drumului",
-                "destination": "Întoarceți-vă spre {destination} la sfârșitul drumului"
+                "destination": "Întoarceți-vă spre {destination} la sfârșitul drumului",
+                "junction_name": "Întoarceți-vă la {junction_name}"
             }
         },
         "fork": {
@@ -14243,7 +14514,7 @@ module.exports={
                 "name_exit": {
                     "default": "Intrați în {rotary_name} și urmați {exit_number} ieșire",
                     "name": "Intrați în {rotary_name} și urmați {exit_number} ieșire pe {way_name}",
-                    "destination": "Intrați în  {rotary_name} și urmați {exit_number} ieșire spre {destination}"
+                    "destination": "Intrați în {rotary_name} și urmați {exit_number} ieșire spre {destination}"
                 }
             }
         },
@@ -14301,22 +14572,26 @@ module.exports={
             "default": {
                 "default": "Virați {modifier}",
                 "name": "Virați {modifier} pe {way_name}",
-                "destination": "Virați {modifier} spre {destination}"
+                "destination": "Virați {modifier} spre {destination}",
+                "junction_name": "Virați {modifier} la {junction_name}"
             },
             "left": {
                 "default": "Virați la stânga",
                 "name": "Virați la stânga pe {way_name}",
-                "destination": "Virați la stânga spre {destination}"
+                "destination": "Virați la stânga spre {destination}",
+                "junction_name": "Virați la stânga la {junction_name}"
             },
             "right": {
                 "default": "Virați la dreapta",
                 "name": "Virați la dreapta pe {way_name}",
-                "destination": "Virați la dreapta spre {destination}"
+                "destination": "Virați la dreapta spre {destination}",
+                "junction_name": "Virați la dreapta la {junction_name}"
             },
             "straight": {
                 "default": "Mergeți înainte",
                 "name": "Mergeți înainte pe {way_name}",
-                "destination": "Mergeți înainte spre {destination}"
+                "destination": "Mergeți înainte spre {destination}",
+                "junction_name": "Mergeți înainte la {junction_name}"
             }
         },
         "use lane": {
@@ -14465,27 +14740,32 @@ module.exports={
             "sharp left": {
                 "default": "Резко поверните налево",
                 "name": "Резко поверните налево на {way_name:accusative}",
-                "destination": "Резко поверните налево в направлении {destination}"
+                "destination": "Резко поверните налево в направлении {destination}",
+                "junction_name": "Резко поверните налево на {junction_name}"
             },
             "sharp right": {
                 "default": "Резко поверните направо",
                 "name": "Резко поверните направо на {way_name:accusative}",
-                "destination": "Резко поверните направо в направлении {destination}"
+                "destination": "Резко поверните направо в направлении {destination}",
+                "junction_name": "Резко поверните направо на {junction_name}"
             },
             "slight left": {
                 "default": "Плавно поверните налево",
                 "name": "Плавно поверните налево на {way_name:accusative}",
-                "destination": "Плавно поверните налево в направлении {destination}"
+                "destination": "Плавно поверните налево в направлении {destination}",
+                "junction_name": "Плавно поверните налево на {junction_name}"
             },
             "slight right": {
                 "default": "Плавно поверните направо",
                 "name": "Плавно поверните направо на {way_name:accusative}",
-                "destination": "Плавно поверните направо в направлении {destination}"
+                "destination": "Плавно поверните направо в направлении {destination}",
+                "junction_name": "Плавно поверните направо на {junction_name}"
             },
             "uturn": {
                 "default": "Развернитесь",
                 "name": "Развернитесь и продолжите движение по {way_name:dative}",
-                "destination": "Развернитесь в направлении {destination}"
+                "destination": "Развернитесь в направлении {destination}",
+                "junction_name": "Развернитесь и продолжите движение по {junction_name}"
             }
         },
         "depart": {
@@ -14499,17 +14779,20 @@ module.exports={
             "default": {
                 "default": "Поверните {modifier}",
                 "name": "Поверните {modifier} на {way_name:accusative}",
-                "destination": "Поверните {modifier} в направлении {destination}"
+                "destination": "Поверните {modifier} в направлении {destination}",
+                "junction_name": "Поверните {modifier} на {junction_name}"
             },
             "straight": {
                 "default": "Двигайтесь прямо",
                 "name": "Двигайтесь прямо по {way_name:dative}",
-                "destination": "Двигайтесь прямо в направлении {destination}"
+                "destination": "Двигайтесь прямо в направлении {destination}",
+                "junction_name": "Двигайтесь прямо по {junction_name}"
             },
             "uturn": {
                 "default": "В конце дороги развернитесь",
                 "name": "Развернитесь в конце {way_name:genitive}",
-                "destination": "В конце дороги развернитесь в направлении {destination}"
+                "destination": "В конце дороги развернитесь в направлении {destination}",
+                "junction_name": "Развернитесь в конце {junction_name}"
             }
         },
         "fork": {
@@ -14796,22 +15079,26 @@ module.exports={
             "default": {
                 "default": "Двигайтесь {modifier}",
                 "name": "Двигайтесь {modifier} на {way_name:accusative}",
-                "destination": "Двигайтесь {modifier}  в направлении {destination}"
+                "destination": "Двигайтесь {modifier} в направлении {destination}",
+                "junction_name": "Двигайтесь {modifier} на {junction_name}"
             },
             "left": {
                 "default": "Поверните налево",
                 "name": "Поверните налево на {way_name:accusative}",
-                "destination": "Поверните налево в направлении {destination}"
+                "destination": "Поверните налево в направлении {destination}",
+                "junction_name": "Поверните налево на {junction_name}"
             },
             "right": {
                 "default": "Поверните направо",
                 "name": "Поверните направо на {way_name:accusative}",
-                "destination": "Поверните направо  в направлении {destination}"
+                "destination": "Поверните направо в направлении {destination}",
+                "junction_name": "Поверните направо на {junction_name}"
             },
             "straight": {
                 "default": "Двигайтесь прямо",
                 "name": "Двигайтесь по {way_name:dative}",
-                "destination": "Двигайтесь в направлении {destination}"
+                "destination": "Двигайтесь в направлении {destination}",
+                "junction_name": "Двигайтесь по {junction_name}"
             }
         },
         "use lane": {
@@ -14960,27 +15247,32 @@ module.exports={
             "sharp left": {
                 "default": "Zavijte ostro levo",
                 "name": "Zavijte ostro levo, da ostanete na {way_name}",
-                "destination": "Zavijte ostro levo v smeri proti {destination}"
+                "destination": "Zavijte ostro levo v smeri proti {destination}",
+                "junction_name": "Zavijte ostro levo na {junction_name}"
             },
             "sharp right": {
                 "default": "Zavijte ostro desno",
                 "name": "Zavijte ostro desno, da ostanete na {way_name}",
-                "destination": "Zavijte ostro desno v smeri proti {destination}"
+                "destination": "Zavijte ostro desno v smeri proti {destination}",
+                "junction_name": "Zavijte ostro desno na {junction_name}"
             },
             "slight left": {
                 "default": "Zavijte rahlo levo",
                 "name": "Zavijte rahlo levo, da ostanete na {way_name}",
-                "destination": "Zavijte rahlo levo v smeri proti {destination}"
+                "destination": "Zavijte rahlo levo v smeri proti {destination}",
+                "junction_name": "Zavijte rahlo levo na {junction_name}"
             },
             "slight right": {
                 "default": "Zavijte rahlo desno",
                 "name": "Zavijte rahlo desno, da ostanete na {way_name}",
-                "destination": "Zavijte rahlo desno v smeri proti {destination}"
+                "destination": "Zavijte rahlo desno v smeri proti {destination}",
+                "junction_name": "Zavijte rahlo desno na {junction_name}"
             },
             "uturn": {
                 "default": "Polkrožno obrnite",
                 "name": "Polkrožno obrnite in nadaljujte po {way_name}",
-                "destination": "Polkrožno obrnite v smeri proti {destination}"
+                "destination": "Polkrožno obrnite v smeri proti {destination}",
+                "junction_name": "Polkrožno obrnite na {junction_name}"
             }
         },
         "depart": {
@@ -14994,17 +15286,20 @@ module.exports={
             "default": {
                 "default": "Zavijte {modifier}",
                 "name": "Zavijte {modifier} na {way_name}",
-                "destination": "Zavijte {modifier} v smeri proti {destination}"
+                "destination": "Zavijte {modifier} v smeri proti {destination}",
+                "junction_name": "Zavijte {modifier} na {junction_name}"
             },
             "straight": {
                 "default": "Nadaljujte naravnost",
                 "name": "Nadaljujte naravnost na {way_name}",
-                "destination": "Nadaljujte naravnost v smeri proti {destination}"
+                "destination": "Nadaljujte naravnost v smeri proti {destination}",
+                "junction_name": "Nadaljujte naravnost na {junction_name}"
             },
             "uturn": {
                 "default": "Na koncu ceste polkrožno obrnite",
                 "name": "Na koncu ceste polkrožno obrnite na {way_name}",
-                "destination": "Na koncu ceste polkrožno obrnite v smeri proti {destination}"
+                "destination": "Na koncu ceste polkrožno obrnite v smeri proti {destination}",
+                "junction_name": "Polkrožno obrnite na {junction_name}"
             }
         },
         "fork": {
@@ -15291,22 +15586,26 @@ module.exports={
             "default": {
                 "default": "Zavijte {modifier}",
                 "name": "Zavijte {modifier} na {way_name}",
-                "destination": "Zavijte {modifier} v smeri proti {destination}"
+                "destination": "Zavijte {modifier} v smeri proti {destination}",
+                "junction_name": "Zavijte {modifier} na {junction_name}"
             },
             "left": {
                 "default": "Zavijte levo",
                 "name": "Zavijte levo na {way_name}",
-                "destination": "Zavijte levo v smeri proti {destination}"
+                "destination": "Zavijte levo v smeri proti {destination}",
+                "junction_name": "Zavijte levo na {junction_name}"
             },
             "right": {
                 "default": "Zavijte desno",
                 "name": "Zavijte desno na {way_name}",
-                "destination": "Zavijte desno v smeri proti {destination}"
+                "destination": "Zavijte desno v smeri proti {destination}",
+                "junction_name": "Zavijte desno na {junction_name}"
             },
             "straight": {
                 "default": "Peljite naravnost",
                 "name": "Peljite naravnost na {way_name}",
-                "destination": "Peljite naravnost v smeri proti {destination}"
+                "destination": "Peljite naravnost v smeri proti {destination}",
+                "junction_name": "Peljite naravnost na {junction_name}"
             }
         },
         "use lane": {
@@ -15455,27 +15754,32 @@ module.exports={
             "sharp left": {
                 "default": "Sväng vänster",
                 "name": "Sväng vänster och fortsätt på {way_name}",
-                "destination": "Sväng vänster mot {destination}"
+                "destination": "Sväng vänster mot {destination}",
+                "junction_name": "Sväng vänster vid {junction_name}"
             },
             "sharp right": {
                 "default": "Sväng höger",
                 "name": "Sväng höger och fortsätt på {way_name}",
-                "destination": "Sväng höger mot {destination}"
+                "destination": "Sväng höger mot {destination}",
+                "junction_name": "Sväng höger vid {junction_name}"
             },
             "slight left": {
                 "default": "Sväng vänster",
                 "name": "Sväng vänster och fortsätt på {way_name}",
-                "destination": "Sväng vänster mot {destination}"
+                "destination": "Sväng vänster mot {destination}",
+                "junction_name": "Sväng vänster vid {junction_name}"
             },
             "slight right": {
                 "default": "Sväng höger",
                 "name": "Sväng höger och fortsätt på {way_name}",
-                "destination": "Sväng höger mot {destination}"
+                "destination": "Sväng höger mot {destination}",
+                "junction_name": "Sväng höger vid {junction_name}"
             },
             "uturn": {
                 "default": "Gör en U-sväng",
                 "name": "Gör en U-sväng och fortsätt på {way_name}",
-                "destination": "Gör en U-sväng mot {destination}"
+                "destination": "Gör en U-sväng mot {destination}",
+                "junction_name": "Gör en U-sväng vid {junction_name}"
             }
         },
         "depart": {
@@ -15489,17 +15793,20 @@ module.exports={
             "default": {
                 "default": "Sväng {modifier}",
                 "name": "Sväng {modifier} in på {way_name}",
-                "destination": "Sväng {modifier} mot {destination}"
+                "destination": "Sväng {modifier} mot {destination}",
+                "junction_name": "Sväng {modifier} vid {junction_name}"
             },
             "straight": {
                 "default": "Fortsätt rakt fram",
                 "name": "Fortsätt rakt fram in på {way_name}",
-                "destination": "Fortsätt rakt fram mot {destination}"
+                "destination": "Fortsätt rakt fram mot {destination}",
+                "junction_name": "Fortsätt rakt fram vid {junction_name}"
             },
             "uturn": {
                 "default": "Gör en U-sväng i slutet av vägen",
                 "name": "Gör en U-sväng in på {way_name} i slutet av vägen",
-                "destination": "Gör en U-sväng mot {destination} i slutet av vägen"
+                "destination": "Gör en U-sväng mot {destination} i slutet av vägen",
+                "junction_name": "Gör en U-sväng vid {junction_name}"
             }
         },
         "fork": {
@@ -15727,7 +16034,7 @@ module.exports={
                 },
                 "name_exit": {
                     "default": "I {rotary_name}, ta {exit_number} avfarten",
-                    "name": "I {rotary_name}, ta {exit_number}  avfarten in på {way_name}",
+                    "name": "I {rotary_name}, ta {exit_number} avfarten in på {way_name}",
                     "destination": "I {rotary_name}, ta {exit_number} avfarten mot {destination}"
                 }
             }
@@ -15786,22 +16093,26 @@ module.exports={
             "default": {
                 "default": "Sväng {modifier}",
                 "name": "Sväng {modifier} in på {way_name}",
-                "destination": "Sväng {modifier} mot {destination}"
+                "destination": "Sväng {modifier} mot {destination}",
+                "junction_name": "Sväng {modifier} vid {junction_name}"
             },
             "left": {
                 "default": "Sväng vänster",
                 "name": "Sväng vänster in på {way_name}",
-                "destination": "Sväng vänster mot {destination}"
+                "destination": "Sväng vänster mot {destination}",
+                "junction_name": "Sväng vänster vid {junction_name}"
             },
             "right": {
                 "default": "Sväng höger",
                 "name": "Sväng höger in på {way_name}",
-                "destination": "Sväng höger mot {destination}"
+                "destination": "Sväng höger mot {destination}",
+                "junction_name": "Sväng höger vid {junction_name}"
             },
             "straight": {
                 "default": "Kör rakt fram",
                 "name": "Kör rakt fram in på {way_name}",
-                "destination": "Kör rakt fram mot {destination}"
+                "destination": "Kör rakt fram mot {destination}",
+                "junction_name": "Kör rakt fram vid {junction_name}"
             }
         },
         "use lane": {
@@ -15950,27 +16261,32 @@ module.exports={
             "sharp left": {
                 "default": "Sola keskin dönüş yap",
                 "name": "{way_name} üzerinde kalmak için sola keskin dönüş yap",
-                "destination": "{destination} istikametinde sola keskin dönüş yap"
+                "destination": "{destination} istikametinde sola keskin dönüş yap",
+                "junction_name": "{junction_name} konumunda sola keskin dönüş yap"
             },
             "sharp right": {
                 "default": "Sağa keskin dönüş yap",
                 "name": "{way_name} üzerinde kalmak için sağa keskin dönüş yap",
-                "destination": "{destination} istikametinde sağa keskin dönüş yap"
+                "destination": "{destination} istikametinde sağa keskin dönüş yap",
+                "junction_name": "{junction_name} konumunda sağa keskin dönüş yap"
             },
             "slight left": {
                 "default": "Sola hafif dönüş yap",
                 "name": "{way_name} üzerinde kalmak için sola hafif dönüş yap",
-                "destination": "{destination} istikametinde sola hafif dönüş yap"
+                "destination": "{destination} istikametinde sola hafif dönüş yap",
+                "junction_name": "{junction_name} konumunda sola hafif dönüş yap"
             },
             "slight right": {
                 "default": "Sağa hafif dönüş yap",
                 "name": "{way_name} üzerinde kalmak için sağa hafif dönüş yap",
-                "destination": "{destination} istikametinde sağa hafif dönüş yap"
+                "destination": "{destination} istikametinde sağa hafif dönüş yap",
+                "junction_name": "{junction_name} konumunda sağa hafif dönüş yap"
             },
             "uturn": {
                 "default": "U dönüşü yapın",
                 "name": "Bir U-dönüşü yap ve {way_name} devam et",
-                "destination": "{destination} istikametinde bir U-dönüşü yap"
+                "destination": "{destination} istikametinde bir U-dönüşü yap",
+                "junction_name": "{junction_name} konumunda U dönüşü yapın"
             }
         },
         "depart": {
@@ -15984,17 +16300,20 @@ module.exports={
             "default": {
                 "default": "{modifier} tarafa dönün",
                 "name": "{way_name} üzerinde {modifier} yöne dön",
-                "destination": "{destination} istikametinde {modifier} yöne dön"
+                "destination": "{destination} istikametinde {modifier} yöne dön",
+                "junction_name": "{junction_name} konumunda {modifier} tarafa dönün"
             },
             "straight": {
                 "default": "Düz devam edin",
                 "name": "{way_name} üzerinde düz devam et",
-                "destination": "{destination} istikametinde düz devam et"
+                "destination": "{destination} istikametinde düz devam et",
+                "junction_name": "{junction_name} konumunda düz devam et"
             },
             "uturn": {
                 "default": "Yolun sonunda U dönüşü yapın",
                 "name": "Yolun sonunda {way_name} üzerinde bir U-dönüşü yap",
-                "destination": "Yolun sonunda {destination} istikametinde bir U-dönüşü yap"
+                "destination": "Yolun sonunda {destination} istikametinde bir U-dönüşü yap",
+                "junction_name": "{junction_name} konumunda bir U-dönüşü yap"
             }
         },
         "fork": {
@@ -16311,22 +16630,26 @@ module.exports={
             "default": {
                 "default": "{modifier} yöne dön",
                 "name": "{way_name} üzerinde {modifier} yöne dön",
-                "destination": "{destination} istikametinde {modifier} yöne dön"
+                "destination": "{destination} istikametinde {modifier} yöne dön",
+                "junction_name": "{junction_name} konumunda {modifier} yöne dön"
             },
             "left": {
                 "default": "Sola dönün",
                 "name": "{way_name} üzerinde sola dön",
-                "destination": "{destination} istikametinde sola dön"
+                "destination": "{destination} istikametinde sola dön",
+                "junction_name": "{junction_name} konumunda sola dön"
             },
             "right": {
                 "default": "Sağa dönün",
                 "name": "{way_name} üzerinde sağa dön",
-                "destination": "{destination} istikametinde sağa dön"
+                "destination": "{destination} istikametinde sağa dön",
+                "junction_name": "{junction_name} konumunda sağa dön"
             },
             "straight": {
                 "default": "Düz git",
                 "name": "{way_name} üzerinde düz git",
-                "destination": "{destination} istikametinde düz git"
+                "destination": "{destination} istikametinde düz git",
+                "junction_name": "{junction_name} konumunda düz git"
             }
         },
         "use lane": {
@@ -16475,27 +16798,32 @@ module.exports={
             "sharp left": {
                 "default": "Поверніть різко ліворуч",
                 "name": "Поверніть різко ліворуч щоб залишитись на {way_name}",
-                "destination": "Поверніть різко ліворуч у напрямку {destination}"
+                "destination": "Поверніть різко ліворуч у напрямку {destination}",
+                "junction_name": "Поверніть різко ліворуч щоб залишитись на {junction_name}"
             },
             "sharp right": {
                 "default": "Поверніть різко праворуч",
                 "name": "Поверніть різко праворуч щоб залишитись на {way_name}",
-                "destination": "Поверніть різко праворуч у напрямку {destination}"
+                "destination": "Поверніть різко праворуч у напрямку {destination}",
+                "junction_name": "Поверніть різко праворуч щоб залишитись на {junction_name}"
             },
             "slight left": {
                 "default": "Поверніть різко ліворуч",
                 "name": "Поверніть плавно ліворуч щоб залишитись на {way_name}",
-                "destination": "Поверніть плавно ліворуч у напрямку {destination}"
+                "destination": "Поверніть плавно ліворуч у напрямку {destination}",
+                "junction_name": "Поверніть плавно ліворуч щоб залишитись на {junction_name}"
             },
             "slight right": {
                 "default": "Поверніть плавно праворуч",
                 "name": "Поверніть плавно праворуч щоб залишитись на {way_name}",
-                "destination": "Поверніть плавно праворуч у напрямку {destination}"
+                "destination": "Поверніть плавно праворуч у напрямку {destination}",
+                "junction_name": "Поверніть плавно праворуч щоб залишитись на {junction_name}"
             },
             "uturn": {
                 "default": "Здійсніть розворот",
                 "name": "Здійсніть розворот та рухайтесь по {way_name}",
-                "destination": "Здійсніть розворот у напрямку {destination}"
+                "destination": "Здійсніть розворот у напрямку {destination}",
+                "junction_name": "Здійсніть розворот та рухайтесь по {junction_name}"
             }
         },
         "depart": {
@@ -16509,17 +16837,20 @@ module.exports={
             "default": {
                 "default": "Поверніть {modifier}",
                 "name": "Поверніть {modifier} на {way_name}",
-                "destination": "Поверніть {modifier} у напрямку {destination}"
+                "destination": "Поверніть {modifier} у напрямку {destination}",
+                "junction_name": "Поверніть {modifier} на {junction_name}"
             },
             "straight": {
                 "default": "Продовжуйте рух прямо",
                 "name": "Продовжуйте рух прямо до {way_name}",
-                "destination": "Продовжуйте рух прямо у напрямку {destination}"
+                "destination": "Продовжуйте рух прямо у напрямку {destination}",
+                "junction_name": "Продовжуйте рух прямо до {junction_name}"
             },
             "uturn": {
                 "default": "Здійсніть розворот в кінці дороги",
                 "name": "Здійсніть розворот на {way_name} в кінці дороги",
-                "destination": "Здійсніть розворот у напрямку {destination} в кінці дороги"
+                "destination": "Здійсніть розворот у напрямку {destination} в кінці дороги",
+                "junction_name": "Здійсніть розворот на {junction_name}"
             }
         },
         "fork": {
@@ -16806,22 +17137,26 @@ module.exports={
             "default": {
                 "default": "Рухайтесь {modifier}",
                 "name": "Рухайтесь {modifier} на {way_name}",
-                "destination": "Рухайтесь {modifier} в напрямку {destination}"
+                "destination": "Рухайтесь {modifier} в напрямку {destination}",
+                "junction_name": "Make a {modifier} at {junction_name}"
             },
             "left": {
                 "default": "Поверніть ліворуч",
                 "name": "Поверніть ліворуч на {way_name}",
-                "destination": "Поверніть ліворуч у напрямку {destination}"
+                "destination": "Поверніть ліворуч у напрямку {destination}",
+                "junction_name": "Turn left at {junction_name}"
             },
             "right": {
                 "default": "Поверніть праворуч",
                 "name": "Поверніть праворуч на {way_name}",
-                "destination": "Поверніть праворуч у напрямку {destination}"
+                "destination": "Поверніть праворуч у напрямку {destination}",
+                "junction_name": "Turn right at {junction_name}"
             },
             "straight": {
                 "default": "Рухайтесь прямо",
                 "name": "Рухайтесь прямо по {way_name}",
-                "destination": "Рухайтесь прямо у напрямку {destination}"
+                "destination": "Рухайтесь прямо у напрямку {destination}",
+                "junction_name": "Go straight at {junction_name}"
             }
         },
         "use lane": {
@@ -16970,27 +17305,32 @@ module.exports={
             "sharp left": {
                 "default": "Quẹo gắt bên trái",
                 "name": "Quẹo gắt bên trái để chạy tiếp trên {way_name}",
-                "destination": "Quẹo gắt bên trái về {destination}"
+                "destination": "Quẹo gắt bên trái về {destination}",
+                "junction_name": "Quẹo gắt bên trái ở {junction_name}"
             },
             "sharp right": {
                 "default": "Quẹo gắt bên phải",
                 "name": "Quẹo gắt bên phải để chạy tiếp trên {way_name}",
-                "destination": "Quẹo gắt bên phải về {destination}"
+                "destination": "Quẹo gắt bên phải về {destination}",
+                "junction_name": "Quẹo gắt bên phải ở {junction_name}"
             },
             "slight left": {
                 "default": "Nghiêng về bên trái",
                 "name": "Nghiêng về bên trái để chạy tiếp trên {way_name}",
-                "destination": "Nghiêng về bên trái về {destination}"
+                "destination": "Nghiêng về bên trái về {destination}",
+                "junction_name": "Nghiêng về bên trái ở {junction_name}"
             },
             "slight right": {
                 "default": "Nghiêng về bên phải",
                 "name": "Nghiêng về bên phải để chạy tiếp trên {way_name}",
-                "destination": "Nghiêng về bên phải về {destination}"
+                "destination": "Nghiêng về bên phải về {destination}",
+                "junction_name": "Nghiêng về bên phải ở {junction_name}"
             },
             "uturn": {
                 "default": "Quẹo ngược lại",
                 "name": "Quẹo ngược lại trên {way_name}",
-                "destination": "Quẹo ngược về {destination}"
+                "destination": "Quẹo ngược về {destination}",
+                "junction_name": "Quẹo ngược lại ở {junction_name}"
             }
         },
         "depart": {
@@ -17004,17 +17344,20 @@ module.exports={
             "default": {
                 "default": "Quẹo {modifier}",
                 "name": "Quẹo {modifier} vào {way_name}",
-                "destination": "Quẹo {modifier} về {destination}"
+                "destination": "Quẹo {modifier} về {destination}",
+                "junction_name": "Quẹo {modifier} ở {junction_name}"
             },
             "straight": {
                 "default": "Chạy thẳng",
                 "name": "Chạy tiếp trên {way_name}",
-                "destination": "Chạy tiếp về {destination}"
+                "destination": "Chạy tiếp về {destination}",
+                "junction_name": "Chạy thẳng ở {junction_name}"
             },
             "uturn": {
                 "default": "Quẹo ngược lại tại cuối đường",
                 "name": "Quẹo ngược vào {way_name} tại cuối đường",
-                "destination": "Quẹo ngược về {destination} tại cuối đường"
+                "destination": "Quẹo ngược về {destination} tại cuối đường",
+                "junction_name": "Quẹo ngược lại ở {junction_name}"
             }
         },
         "fork": {
@@ -17301,22 +17644,26 @@ module.exports={
             "default": {
                 "default": "Quẹo {modifier}",
                 "name": "Quẹo {modifier} vào {way_name}",
-                "destination": "Quẹo {modifier} về {destination}"
+                "destination": "Quẹo {modifier} về {destination}",
+                "junction_name": "Quẹo {modifier} ở {junction_name}"
             },
             "left": {
                 "default": "Quẹo trái",
                 "name": "Quẹo trái vào {way_name}",
-                "destination": "Quẹo trái về {destination}"
+                "destination": "Quẹo trái về {destination}",
+                "junction_name": "Quẹo trái ở {junction_name}"
             },
             "right": {
                 "default": "Quẹo phải",
                 "name": "Quẹo phải vào {way_name}",
-                "destination": "Quẹo phải về {destination}"
+                "destination": "Quẹo phải về {destination}",
+                "junction_name": "Quẹo phải ở {junction_name}"
             },
             "straight": {
                 "default": "Chạy thẳng",
                 "name": "Chạy thẳng vào {way_name}",
-                "destination": "Chạy thẳng về {destination}"
+                "destination": "Chạy thẳng về {destination}",
+                "junction_name": "Chạy thẳng ở {junction_name}"
             }
         },
         "use lane": {
@@ -17465,27 +17812,32 @@ module.exports={
             "sharp left": {
                 "default": "Ṣe kan osi osi",
                 "name": "Ṣe ọpa didasilẹ lati duro si {way_name}",
-                "destination": "Ṣe idasilẹ mimu si ọna {destination}"
+                "destination": "Ṣe idasilẹ mimu si ọna {destination}",
+                "junction_name": "Ṣe kan osi ni {junction_name}"
             },
             "sharp right": {
                 "default": "Ṣe idasilẹ to dara",
                 "name": "Ṣe idasilẹ to dara lati duro si {way_name}",
-                "destination": "Ṣe didasilẹ si ọtun si ọna {destination}"
+                "destination": "Ṣe didasilẹ si ọtun si ọna {destination}",
+                "junction_name": "Ṣe idasilẹ to dara ni {junction_name}"
             },
             "slight left": {
                 "default": "Ṣe diẹ osi",
                 "name": "Ṣe diẹ si osi lati duro si {way_name}",
-                "destination": "Ṣe diẹ si apa osi si ọna {destination}"
+                "destination": "Ṣe diẹ si apa osi si ọna {destination}",
+                "junction_name": "Ṣe diẹ osi ni {junction_name}"
             },
             "slight right": {
                 "default": "Ṣe diẹ diẹ si ọtun",
                 "name": "Ṣe diẹ si ọtun lati duro si {way_name}",
-                "destination": "Ṣe diẹ si ọtun si ọna {destination}"
+                "destination": "Ṣe diẹ si ọtun si ọna {destination}",
+                "junction_name": "Ṣe diẹ diẹ si ọtun ni {junction_name}"
             },
             "uturn": {
                 "default": "Ṣe ayipada U",
                 "name": "Ṣe ayipada U ati tẹsiwaju {way_name}",
-                "destination": "Ṣe ọna U-ọna si ọna {destination}"
+                "destination": "Ṣe ọna U-ọna si ọna {destination}",
+                "junction_name": "Ṣe ayipada U ni {junction_name}"
             }
         },
         "depart": {
@@ -17499,17 +17851,20 @@ module.exports={
             "default": {
                 "default": "Tan-an {modifier}",
                 "name": "Tan-an {modifier} pẹlẹpẹlẹ {way_name}",
-                "destination": "Tan-an {modifier} si ọna {destination}"
+                "destination": "Tan-an {modifier} si ọna {destination}",
+                "junction_name": "Tan-an {modifier} ni {junction_name}"
             },
             "straight": {
                 "default": "Tẹsiwaju ni gígùn",
                 "name": "Tesiwaju tẹsiwaju lẹsẹkẹsẹ {way_name}",
-                "destination": "Tesiwaju si ọna ọtun {destination}"
+                "destination": "Tesiwaju si ọna ọtun {destination}",
+                "junction_name": "Tẹsiwaju ni gígùn ni {junction_name}"
             },
             "uturn": {
                 "default": "Ṣe a-ẹ-yipada ni opin ọna",
                 "name": "Ṣe U-tan pẹlẹpẹlẹ {way_name} ni opin ọna",
-                "destination": "Ṣe ọna U-ọna si ọna {destination} ni opin ọna"
+                "destination": "Ṣe ọna U-ọna si ọna {destination} ni opin ọna",
+                "junction_name": "Ṣe ayipada U ni {junction_name}"
             }
         },
         "fork": {
@@ -17796,22 +18151,26 @@ module.exports={
             "default": {
                 "default": "Ṣe a {modifier}",
                 "name": "Ṣe a {modifier} pẹlẹpẹlẹ {way_name}",
-                "destination": "Ṣe a {modifier} si ọna {destination}"
+                "destination": "Ṣe a {modifier} si ọna {destination}",
+                "junction_name": "Ṣe a {modifier} ni {junction_name}"
             },
             "left": {
                 "default": "Ya si apa osi",
                 "name": "Tan apa osi pẹlẹpẹlẹ {way_name}",
-                "destination": "Tan apa osi si ọna {destination}"
+                "destination": "Tan apa osi si ọna {destination}",
+                "junction_name": "Ya si apa osi ni {junction_name}"
             },
             "right": {
                 "default": "Ya sowo otun",
                 "name": "Tan ọtun si {way_name}",
-                "destination": "Tan-ọtun si ọna {destination}"
+                "destination": "Tan-ọtun si ọna {destination}",
+                "junction_name": "Ya sowo otun ni {junction_name}"
             },
             "straight": {
                 "default": "Rin taara",
                 "name": "Lọ si pẹkipẹki {way_name}",
-                "destination": "Lọ taara si ọna {destination}"
+                "destination": "Lọ taara si ọna {destination}",
+                "junction_name": "Rin taara ni {junction_name}"
             }
         },
         "use lane": {
@@ -17960,27 +18319,32 @@ module.exports={
             "sharp left": {
                 "default": "前方左急转弯",
                 "name": "前方左急转弯，继续在{way_name}上行驶",
-                "destination": "左急转弯，前往{destination}"
+                "destination": "左急转弯，前往{destination}",
+                "junction_name": "Make a sharp left at {junction_name}"
             },
             "sharp right": {
                 "default": "前方右急转弯",
                 "name": "前方右急转弯，继续在{way_name}上行驶",
-                "destination": "右急转弯，前往{destination}"
+                "destination": "右急转弯，前往{destination}",
+                "junction_name": "Make a sharp right at {junction_name}"
             },
             "slight left": {
                 "default": "前方稍向左转",
                 "name": "前方稍向左转，继续在{way_name}上行驶",
-                "destination": "稍向左转，前往{destination}"
+                "destination": "稍向左转，前往{destination}",
+                "junction_name": "Make a slight left at {junction_name}"
             },
             "slight right": {
                 "default": "前方稍向右转",
                 "name": "前方稍向右转，继续在{way_name}上行驶",
-                "destination": "前方稍向右转，前往{destination}"
+                "destination": "前方稍向右转，前往{destination}",
+                "junction_name": "Make a slight right at {junction_name}"
             },
             "uturn": {
                 "default": "前方调头",
                 "name": "前方调头，继续在{way_name}上行驶",
-                "destination": "前方调头，前往{destination}"
+                "destination": "前方调头，前往{destination}",
+                "junction_name": "Make a U-turn at {junction_name}"
             }
         },
         "depart": {
@@ -17994,17 +18358,20 @@ module.exports={
             "default": {
                 "default": "{modifier}行驶",
                 "name": "{modifier}行驶，驶入{way_name}",
-                "destination": "{modifier}行驶，前往{destination}"
+                "destination": "{modifier}行驶，前往{destination}",
+                "junction_name": "Turn {modifier} at {junction_name}"
             },
             "straight": {
                 "default": "继续直行",
                 "name": "继续直行，驶入{way_name}",
-                "destination": "继续直行，前往{destination}"
+                "destination": "继续直行，前往{destination}",
+                "junction_name": "Continue straight at {junction_name}"
             },
             "uturn": {
                 "default": "在道路尽头调头",
                 "name": "在道路尽头调头驶入{way_name}",
-                "destination": "在道路尽头调头，前往{destination}"
+                "destination": "在道路尽头调头，前往{destination}",
+                "junction_name": "Make a U-turn at {junction_name} at the end of the road"
             }
         },
         "fork": {
@@ -18291,22 +18658,26 @@ module.exports={
             "default": {
                 "default": "{modifier}转弯",
                 "name": "{modifier}转弯，驶入{way_name}",
-                "destination": "{modifier}转弯，前往{destination}"
+                "destination": "{modifier}转弯，前往{destination}",
+                "junction_name": "Make a {modifier} at {junction_name}"
             },
             "left": {
                 "default": "左转",
                 "name": "左转，驶入{way_name}",
-                "destination": "左转，前往{destination}"
+                "destination": "左转，前往{destination}",
+                "junction_name": "Turn left at {junction_name}"
             },
             "right": {
                 "default": "右转",
                 "name": "右转，驶入{way_name}",
-                "destination": "右转，前往{destination}"
+                "destination": "右转，前往{destination}",
+                "junction_name": "Turn right at {junction_name}"
             },
             "straight": {
                 "default": "直行",
                 "name": "直行，驶入{way_name}",
-                "destination": "直行，前往{destination}"
+                "destination": "直行，前往{destination}",
+                "junction_name": "Go straight at {junction_name}"
             }
         },
         "use lane": {
@@ -18789,13 +19160,13 @@ module.exports={
 			}, this);
 
 
-			l.on('linemouseovered', function(e) {
-				console.log('[_hookAltEvents] linemouseovered')
-				debugger
-				// var alts = this._routes.slice();
-				// var selected = alts.splice(e.target._route.routesIndex, 1)[0];
-				// this.fire('routeselected', {route: selected, alternatives: alts});
-			}, this);
+			// l.on('linemouseovered', function(e) {
+			// 	console.log('[_hookAltEvents] linemouseovered')
+			// 	debugger
+			// 	// var alts = this._routes.slice();
+			// 	// var selected = alts.splice(e.target._route.routesIndex, 1)[0];
+			// 	// this.fire('routeselected', {route: selected, alternatives: alts});
+			// }, this);
 		},
 
 		_onWaypointsChanged: function(e) {
@@ -19656,7 +20027,7 @@ module.exports = L.Routing = {
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
 },{"./formatter":58,"./itinerary-builder":61}],63:[function(_dereq_,module,exports){
 (function (global){(function (){
-(function () {
+(function() {
 	'use strict';
 
 	var L = (typeof window !== "undefined" ? window['L'] : typeof global !== "undefined" ? global['L'] : null);
@@ -19666,21 +20037,21 @@ module.exports = L.Routing = {
 
 		options: {
 			styles: [
-				{ color: 'black', opacity: 0.15, weight: 9 },
-				{ color: 'white', opacity: 0.8, weight: 6 },
-				{ color: 'red', opacity: 1, weight: 2 }
+				{color: 'black', opacity: 0.15, weight: 9},
+				{color: 'white', opacity: 0.8, weight: 6},
+				{color: 'red', opacity: 1, weight: 2}
 			],
 			missingRouteStyles: [
-				{ color: 'black', opacity: 0.15, weight: 7 },
-				{ color: 'white', opacity: 0.6, weight: 4 },
-				{ color: 'gray', opacity: 0.8, weight: 2, dashArray: '7,12' }
+				{color: 'black', opacity: 0.15, weight: 7},
+				{color: 'white', opacity: 0.6, weight: 4},
+				{color: 'gray', opacity: 0.8, weight: 2, dashArray: '7,12'}
 			],
 			addWaypoints: true,
 			extendToWaypoints: true,
 			missingRouteTolerance: 10
 		},
 
-		initialize: function (route, options) {
+		initialize: function(route, options) {
 			L.setOptions(this, options);
 			L.LayerGroup.prototype.initialize.call(this, options);
 			this._route = route;
@@ -19695,14 +20066,14 @@ module.exports = L.Routing = {
 				this.options.addWaypoints);
 		},
 
-		getBounds: function () {
+		getBounds: function() {
 			return L.latLngBounds(this._route.coordinates);
 		},
 
-		_findWaypointIndices: function () {
+		_findWaypointIndices: function() {
 			var wps = this._route.inputWaypoints,
-				indices = [],
-				i;
+			    indices = [],
+			    i;
 			for (i = 0; i < wps.length; i++) {
 				indices.push(this._findClosestRoutePoint(wps[i].latLng));
 			}
@@ -19710,13 +20081,13 @@ module.exports = L.Routing = {
 			return indices;
 		},
 
-		_findClosestRoutePoint: function (latlng) {
+		_findClosestRoutePoint: function(latlng) {
 			var minDist = Number.MAX_VALUE,
 				minIndex,
-				i,
-				d;
+			    i,
+			    d;
 
-			for (i = this._route.coordinates.length - 1; i >= 0; i--) {
+			for (i = this._route.coordinates.length - 1; i >= 0 ; i--) {
 				// TODO: maybe do this in pixel space instead?
 				d = latlng.distanceTo(this._route.coordinates[i]);
 				if (d < minDist) {
@@ -19728,12 +20099,12 @@ module.exports = L.Routing = {
 			return minIndex;
 		},
 
-		_extendToWaypoints: function () {
+		_extendToWaypoints: function() {
 			var wps = this._route.inputWaypoints,
 				wpIndices = this._getWaypointIndices(),
-				i,
-				wpLatLng,
-				routeCoord;
+			    i,
+			    wpLatLng,
+			    routeCoord;
 
 			for (i = 0; i < wps.length; i++) {
 				wpLatLng = wps[i].latLng;
@@ -19746,7 +20117,7 @@ module.exports = L.Routing = {
 			}
 		},
 
-		_addSegment: function (coords, styles, mouselistener) {
+		_addSegment: function(coords, styles, mouselistener) {
 			var i,
 				pl;
 
@@ -19757,15 +20128,17 @@ module.exports = L.Routing = {
 					pl.on('mousedown', this._onLineTouched, this);
 				}
 
-				console.log('--- [line.js] --- adding pl.on(mouseover)')
-
-				pl.on('mouseover', function (arg) {
-					return this._onLineMouseOver(arg, pl)
-				}, this);
+				const events = ['mouseover', 'mouseout', 'mouseenter','mouseleave']
+				
+				events.forEach(function (eventName) {
+					pl.on(eventName, function (arg) {
+						return this._onLineMouse(arg, pl, 'line-' + eventName)
+					}, this);
+				})
 			}
 		},
 
-		_findNearestWpBefore: function (i) {
+		_findNearestWpBefore: function(i) {
 			var wpIndices = this._getWaypointIndices(),
 				j = wpIndices.length - 1;
 			while (j >= 0 && wpIndices[j] > i) {
@@ -19775,7 +20148,7 @@ module.exports = L.Routing = {
 			return j;
 		},
 
-		_onLineTouched: function (e) {
+		_onLineTouched: function(e) {
 			var afterIndex = this._findNearestWpBefore(this._findClosestRoutePoint(e.latlng));
 			this.fire('linetouched', {
 				afterIndex: afterIndex,
@@ -19784,20 +20157,14 @@ module.exports = L.Routing = {
 			L.DomEvent.stop(e);
 		},
 
-		_onLineMouseOver: function (e, pl) {
-			console.log('--- [line.js] --- run _onLineMouseOver', e)
+		_onLineMouse: function (e, pl, eventName) {
+			console.log('--- [line.js] [_onLineMouse] --- run _onLineMouse', e, { eventName })
 
 			var afterIndex = this._findNearestWpBefore(this._findClosestRoutePoint(e.latlng));
 
-			console.log('[_onLineMouseOver] + trying to SEX fire "linemouseovered"')
-			// console.log('[_onLineMouseOver] + trying to SEX fire "linemouseovered"', afterIndex)
+			console.log('--- [line.js] [_onLineMouse] --- trying to dispatch event', { eventName, afterIndex })
 
-			// this.fire('linemouseovered', {
-			// 	afterIndex: afterIndex,
-			// 	latlng: e.latlng
-			// });
-
-			var event = new CustomEvent("linemouseovered", {
+			var event = new CustomEvent(eventName, {
 				detail: {
 					afterIndex: afterIndex,
 					latlng: e.latlng,
@@ -19806,15 +20173,13 @@ module.exports = L.Routing = {
 					ctx: this,
 				}
 			})
-			
+
 			document.dispatchEvent(event)
 
-			window.t = this
-			window.L = L
 			L.DomEvent.stop(e);
 		},
 
-		_getWaypointIndices: function () {
+		_getWaypointIndices: function() {
 			if (!this._wpIndices) {
 				this._wpIndices = this._route.waypointIndices || this._findWaypointIndices();
 			}
