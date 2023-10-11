@@ -98,6 +98,10 @@
 				if (mouselistener) {
 					pl.on('mousedown', this._onLineTouched, this);
 				}
+
+				pl.on('mouseover', function (arg) {
+					return this._onLineMouseOver(arg, pl)
+				}, this);
 			}
 		},
 
@@ -117,6 +121,28 @@
 				afterIndex: afterIndex,
 				latlng: e.latlng
 			});
+			L.DomEvent.stop(e);
+		},
+
+		_onLineMouseOver: function (e, pl) {
+			console.log('--- [line.js] --- run _onLineMouseOver', e)
+
+			var afterIndex = this._findNearestWpBefore(this._findClosestRoutePoint(e.latlng));
+
+			console.log('[_onLineMouseOver] + trying to SEX fire "linemouseovered"', afterIndex)
+
+			var event = new CustomEvent("linemouseovered", {
+				detail: {
+					afterIndex: afterIndex,
+					latlng: e.latlng,
+					arg: e,
+					polyline: pl,
+					ctx: this,
+				}
+			})
+
+			document.dispatchEvent(event)
+
 			L.DomEvent.stop(e);
 		},
 
