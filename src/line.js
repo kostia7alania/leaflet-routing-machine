@@ -95,6 +95,11 @@
 			for (i = 0; i < styles.length; i++) {
 				pl = L.polyline(coords, styles[i]);
 				this.addLayer(pl);
+
+				pl.on('add', function (arg) {
+					return this._onLineCreated(arg, pl)
+				}, this);
+
 				if (mouselistener) {
 					pl.on('mousedown', this._onLineTouched, this);
 				}
@@ -125,6 +130,22 @@
 				afterIndex: afterIndex,
 				latlng: e.latlng
 			});
+			L.DomEvent.stop(e);
+		},
+
+		_onLineCreated: function (e, pl) {
+			console.log('--- [line.js] [_onLineCreated] --- run _onLineCreated', e, { eventName })
+
+			var event = new CustomEvent('line-mounted', {
+				detail: {
+					arg: e,
+					polyline: pl,
+					ctx: this,
+				}
+			})
+
+			document.dispatchEvent(event)
+
 			L.DomEvent.stop(e);
 		},
 

@@ -19140,16 +19140,6 @@ module.exports={
 					this._plan.dragNewWaypoint(e);
 				}
 			}, this);
-
-
-			// l.on('linemouseovered', function(e) {
-			// 	debugger
-			// 	console.log('[_hookEvents] l.on = linemouseovered')
-			// // 	// if (e.afterIndex < this.getWaypoints().length - 1) {
-			// // 		// this._plan.dragNewWaypoint(e);
-			// // 	// }
-			// });
-
 		},
 
 		_hookAltEvents: function(l) {
@@ -19158,15 +19148,6 @@ module.exports={
 				var selected = alts.splice(e.target._route.routesIndex, 1)[0];
 				this.fire('routeselected', {route: selected, alternatives: alts});
 			}, this);
-
-
-			// l.on('linemouseovered', function(e) {
-			// 	console.log('[_hookAltEvents] linemouseovered')
-			// 	debugger
-			// 	// var alts = this._routes.slice();
-			// 	// var selected = alts.splice(e.target._route.routesIndex, 1)[0];
-			// 	// this.fire('routeselected', {route: selected, alternatives: alts});
-			// }, this);
 		},
 
 		_onWaypointsChanged: function(e) {
@@ -20124,13 +20105,18 @@ module.exports = L.Routing = {
 			for (i = 0; i < styles.length; i++) {
 				pl = L.polyline(coords, styles[i]);
 				this.addLayer(pl);
+
+				pl.on('add', function (arg) {
+					return this._onLineCreated(arg, pl)
+				}, this);
+
 				if (mouselistener) {
 					pl.on('mousedown', this._onLineTouched, this);
 				}
 
 				const events = ['mouseover', 'mouseout', 'mouseenter','mouseleave']
 				
-				events.forEach(function (eventName) {
+				events.forEach(eventName => {
 					pl.on(eventName, function (arg) {
 						return this._onLineMouse(arg, pl, 'line-' + eventName)
 					}, this);
@@ -20154,6 +20140,22 @@ module.exports = L.Routing = {
 				afterIndex: afterIndex,
 				latlng: e.latlng
 			});
+			L.DomEvent.stop(e);
+		},
+
+		_onLineCreated: function (e, pl) {
+			console.log('--- [line.js] [_onLineCreated] --- run _onLineCreated', e, { eventName })
+
+			var event = new CustomEvent('line-mounted', {
+				detail: {
+					arg: e,
+					polyline: pl,
+					ctx: this,
+				}
+			})
+
+			document.dispatchEvent(event)
+
 			L.DomEvent.stop(e);
 		},
 
