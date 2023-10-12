@@ -20144,7 +20144,7 @@ module.exports = L.Routing = {
 		},
 
 		_onLineCreated: function (e, pl) {
-			console.log('--- [line.js] [_onLineCreated] --- run _onLineCreated', e, { eventName })
+			console.log('--- [line.js] [_onLineCreated] --- run _onLineCreated', e)
 
 			var event = new CustomEvent('line-mounted', {
 				detail: {
