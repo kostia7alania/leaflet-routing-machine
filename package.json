@@ -21,14 +21,14 @@
     "osrm"
   ],
   "author": {
-    "name": "Per Liedman",
-    "email": "per@liedman.net"
+    "name": "Kostia Bazrov",
+    "email": "osetia-alania@mail.ru"
   },
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/perliedman/leaflet-routing-machine/issues"
+    "url": "https://github.com/kostia7alania/leaflet-routing-machine/issues"
   },
-  "homepage": "https://github.com/perliedman/leaflet-routing-machine",
+  "homepage": "https://github.com/kostia7alania/leaflet-routing-machine",
   "browserify-shim": {
     "leaflet": "global:L"
   },
